@@ -15,7 +15,7 @@ up for you.
 Tested on Ubuntu 24.04. Debian 12 and other recent Ubuntu releases should work.
 
 ```bash
-git clone https://github.com/<you>/netchaos-lab.git
+git clone https://github.com/marion-official/netchaos-lab.git
 cd netchaos-lab
 ./scripts/setup-host.sh      # Docker, containerlab, tools, kernel modules (uses sudo)
 # log out and back in if it added you to the docker group
@@ -43,7 +43,7 @@ Install one VM tool first:
 Then, from your clone on the Mac:
 
 ```bash
-git clone https://github.com/<you>/netchaos-lab.git
+git clone https://github.com/marion-official/netchaos-lab.git
 cd netchaos-lab
 ./scripts/mac-vm.sh          # OrbStack if installed, else Lima (--lima / --orbstack to choose)
 ```

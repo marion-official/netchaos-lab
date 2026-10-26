@@ -58,7 +58,7 @@ human.
 **Ubuntu / Debian**
 
 ```bash
-git clone https://github.com/<you>/netchaos-lab.git && cd netchaos-lab
+git clone https://github.com/marion-official/netchaos-lab.git && cd netchaos-lab
 ./scripts/setup-host.sh       # Docker + containerlab + tools (log out/in afterwards if asked)
 ./labctl doctor && ./labctl up
 ./labctl break --level 1
@@ -67,7 +67,7 @@ git clone https://github.com/<you>/netchaos-lab.git && cd netchaos-lab
 **macOS** (with [OrbStack](https://orbstack.dev) or [Lima](https://lima-vm.io))
 
 ```bash
-git clone https://github.com/<you>/netchaos-lab.git && cd netchaos-lab
+git clone https://github.com/marion-official/netchaos-lab.git && cd netchaos-lab
 ./scripts/mac-vm.sh           # creates an Ubuntu VM, copies the lab into it, sets it up
 orb -m netchaos               # or: limactl shell netchaos
 cd ~/netchaos-lab && ./labctl up && ./labctl break --level 1
