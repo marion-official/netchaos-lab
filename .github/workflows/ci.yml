@@ -1,0 +1,92 @@
+name: CI
+
+# Deploys the real lab with containerlab on GitHub's Ubuntu runners, then injects and fixes every
+# fault. The job logs contain spoilers (fault ids and parameters) - don't read them while you play.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n
+        run: |
+          for f in labctl faults/*.sh scripts/*.sh ai/*.sh ai/labctl-ai audit/*.sh ipv6/*.sh ai/workspace/.claude/hooks/*.sh; do
+            bash -n "$f" || exit 1
+          done
+      - name: shellcheck (errors only)
+        run: |
+          shellcheck --version
+          shellcheck -S error -s bash labctl faults/*.sh scripts/*.sh ai/*.sh ai/labctl-ai \
+            audit/*.sh ipv6/*.sh ai/workspace/.claude/hooks/*.sh
+      - name: JSON is valid
+        run: jq empty ai/workspace/.claude/settings.json
+      - name: fault files follow the contract
+        run: |
+          rc=0
+          for f in faults/*.sh; do
+            id=$(basename "$f" .sh); lvl=${id:1:1}
+            grep -q "^FAULT_LEVEL=$lvl\$" "$f" || { echo "$id: FAULT_LEVEL doesn't match the file name"; rc=1; }
+            for fn in fault_pick fault_ticket fault_inject fault_verify fault_fix fault_hints fault_solution; do
+              grep -q "^$fn()" "$f" || { echo "$id: missing $fn"; rc=1; }
+            done
+          done
+          exit $rc
+
+  ipv4:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare the host (the same script users run; the runner user is already in the docker group)
+        run: ./scripts/setup-host.sh
+      - name: Doctor
+        run: ./labctl doctor
+      - name: Deploy
+        run: ./labctl up
+      - name: Health
+        run: ./labctl selftest
+      - name: Inject and fix every fault
+        run: ./labctl selftest-faults
+      - name: Recover after a simulated host restart
+        run: |
+          set -e
+          ./labctl break --fault l3-duplicate-mac --seed 1 --investigator human
+          # a host/VM reboot kills every container network namespace, and with it the veth links
+          docker restart $(docker ps -q --filter name=clab-dc-) >/dev/null
+          ./labctl recover
+          if ./labctl check; then echo "check passed although the fault should be back"; exit 1; fi
+          ls journal/*.commands.part1.log
+      - name: Tear down
+        if: always()
+        run: ./labctl down || true
+
+  ipv6:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare the host
+        run: ./scripts/setup-host.sh
+      - name: Deploy dual-stack
+        run: ./labctl up --ipv6
+      - name: Health
+        run: ./labctl selftest
+      - name: Inject and fix the IPv6-only faults (plus a few IPv4 ones, to catch dual-stack regressions)
+        run: |
+          ids="$(ls faults/*-v6-*.sh | xargs -n1 basename | sed 's/\.sh$//') l1-port-down l2-wrong-gateway l1-fw-dnat"
+          ./labctl selftest-faults $ids
+      - name: Tear down
+        if: always()
+        run: ./labctl down || true

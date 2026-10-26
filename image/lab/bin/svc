@@ -1,0 +1,70 @@
+#!/bin/bash
+# svc: a tiny systemctl stand-in (containers don't run systemd).
+#   svc status                 all services on this node
+#   svc start|stop|restart X   X in: rsyslog sshd frr named nginx app haproxy postgres
+set -u
+action=${1:-status}; name=${2:-}
+
+pidof_svc() {
+  case $1 in
+    rsyslog)  pgrep -x rsyslogd ;;
+    sshd)     pgrep -f '^sshd: /usr/sbin/sshd' | head -1 ;;
+    frr)      pgrep -x bgpd ;;
+    named)    pgrep -x named ;;
+    nginx)    pgrep -f 'nginx: master' ;;
+    app)      pgrep -f '/lab/app/app.py' ;;
+    haproxy)  pgrep -x haproxy | head -1 ;;
+    postgres) pgrep -f 'postgres -D' | head -1 ;;
+  esac
+}
+
+start() {
+  case $1 in
+    rsyslog)  rsyslogd ;;
+    sshd)     mkdir -p /run/sshd && /usr/sbin/sshd ;;
+    frr)      /usr/lib/frr/frrinit.sh start >/dev/null ;;
+    named)    mkdir -p /run/named && chown bind:bind /run/named && named -u bind ;;
+    nginx)    nginx ;;
+    app)      nohup python3 /lab/app/app.py >>/var/log/app/app.log 2>&1 & ;;
+    haproxy)  mkdir -p /run/haproxy && haproxy -D -f /etc/haproxy/haproxy.cfg -p /run/haproxy.pid ;;
+    postgres) pg_ctlcluster 15 main start ;;
+    *) echo "unknown service: $1" >&2; return 1 ;;
+  esac
+}
+
+stop() {
+  case $1 in
+    frr)      /usr/lib/frr/frrinit.sh stop >/dev/null ;;
+    postgres) pg_ctlcluster 15 main stop ;;
+    nginx)    nginx -s quit ;;
+    rsyslog)  pkill -x rsyslogd ;;
+    sshd)     pkill -f '^sshd: /usr/sbin/sshd' ;;
+    named)    pkill -x named ;;
+    app)      pkill -f '/lab/app/app.py' ;;
+    haproxy)  pkill -x haproxy ;;
+  esac
+  sleep 1
+}
+
+case $action in
+  start)   [ -n "$(pidof_svc "$name")" ] && echo "$name already running" || start "$name" ;;
+  stop)    stop "$name" ;;
+  restart) stop "$name"; start "$name" ;;
+  reload)
+    case $name in
+      nginx)   nginx -s reload ;;
+      named)   rndc reload 2>/dev/null || { pkill -HUP -x named; } ;;
+      haproxy) haproxy -c -f /etc/haproxy/haproxy.cfg && \
+               haproxy -D -f /etc/haproxy/haproxy.cfg -p /run/haproxy.pid -sf "$(cat /run/haproxy.pid)" ;;
+      frr)     /usr/lib/frr/frr-reload.py --reload /etc/frr/frr.conf ;;
+      *)       "$0" restart "$name" ;;
+    esac ;;
+  status)
+    # /etc/lab-services lists what this node's role is supposed to run
+    for s in rsyslog sshd $(cat /etc/lab-services 2>/dev/null); do
+      p=$(pidof_svc $s)
+      if [ -n "$p" ]; then printf '%-9s running (pid %s)\n' "$s" "$p"
+      else printf '%-9s STOPPED\n' "$s"; fi
+    done ;;
+  *) echo "usage: svc status | svc start|stop|restart|reload <service>" >&2; exit 1 ;;
+esac

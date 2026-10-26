@@ -1,0 +1,44 @@
+#!/usr/sbin/nft -f
+# Edge firewall policy. eth1 = inside (towards border), eth2 = outside (internet), eth0 = mgmt.
+flush ruleset
+
+define INSIDE  = "eth1"
+define OUTSIDE = "eth2"
+define SHOP_VIP = 203.0.113.10
+define SHOP_LB  = 10.10.10.10
+
+table inet filter {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    iif "lo" accept
+    ct state established,related accept
+    iifname "eth0" accept comment "mgmt"
+    meta l4proto icmp accept
+  }
+
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+    ct state established,related accept
+    ct state invalid drop
+    # published services (DNAT already happened in prerouting)
+    iifname $OUTSIDE oifname $INSIDE ip daddr $SHOP_LB tcp dport 80 ct status dnat accept comment "shop"
+    # the DC may talk to the internet
+    iifname $INSIDE oifname $OUTSIDE accept
+    counter comment "dropped by default policy"
+  }
+
+  chain output {
+    type filter hook output priority filter; policy accept;
+  }
+}
+
+table ip nat {
+  chain prerouting {
+    type nat hook prerouting priority dstnat;
+    iifname $OUTSIDE ip daddr $SHOP_VIP tcp dport 80 dnat to $SHOP_LB:80
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat;
+    oifname $OUTSIDE ip saddr 10.0.0.0/8 masquerade
+  }
+}

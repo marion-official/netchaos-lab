@@ -1,0 +1,59 @@
+# netchaos-lab: a small but realistic datacenter
+#
+#   inet-client --(203.0.113.0/24)-- fw --(10.0.9.0/31)-- border
+#                                                        /     \
+#                                                   spine1     spine2      eBGP, ECMP, L4 hashing
+#                                                   /    \     /    \
+#                                                leaf1        leaf2
+#                                    VLAN10 10.10.10.0/24   VLAN20 10.10.20.0/24 (data)
+#                                    lb1  web1  web2        VLAN30 10.10.30.0/24 (services)
+#                                                           db1          dns1
+#
+# Every node also has eth0 on the out-of-band management network (172.30.30.0/24).
+# Production traffic never uses eth0: default routes are moved to the fabric at boot.
+
+name: dc
+
+mgmt:
+  network: dc-mgmt
+  ipv4-subnet: 172.30.30.0/24
+
+topology:
+  defaults:
+    kind: linux
+    image: netchaos/node:latest
+
+  nodes:
+    # ---- fabric ----
+    spine1: { mgmt-ipv4: 172.30.30.11, env: { ROLE: router } }
+    spine2: { mgmt-ipv4: 172.30.30.12, env: { ROLE: router } }
+    leaf1:  { mgmt-ipv4: 172.30.30.21, env: { ROLE: router } }
+    leaf2:  { mgmt-ipv4: 172.30.30.22, env: { ROLE: router } }
+    border: { mgmt-ipv4: 172.30.30.23, env: { ROLE: router } }
+    # ---- edge ----
+    fw:          { mgmt-ipv4: 172.30.30.31, env: { ROLE: firewall } }
+    inet-client: { mgmt-ipv4: 172.30.30.99, env: { ROLE: client } }
+    # ---- servers ----
+    lb1:  { mgmt-ipv4: 172.30.30.41, env: { ROLE: lb } }
+    web1: { mgmt-ipv4: 172.30.30.42, env: { ROLE: web } }
+    web2: { mgmt-ipv4: 172.30.30.43, env: { ROLE: web } }
+    db1:  { mgmt-ipv4: 172.30.30.51, env: { ROLE: db } }
+    dns1: { mgmt-ipv4: 172.30.30.52, env: { ROLE: dns } }
+
+  links:
+    # spine <-> leaf/border (fabric, jumbo MTU 9000 set at boot)
+    - endpoints: ["spine1:eth1", "leaf1:eth1"]
+    - endpoints: ["spine1:eth2", "leaf2:eth1"]
+    - endpoints: ["spine1:eth3", "border:eth1"]
+    - endpoints: ["spine2:eth1", "leaf1:eth2"]
+    - endpoints: ["spine2:eth2", "leaf2:eth2"]
+    - endpoints: ["spine2:eth3", "border:eth2"]
+    # border <-> firewall <-> "internet"
+    - endpoints: ["border:eth3", "fw:eth1"]
+    - endpoints: ["fw:eth2", "inet-client:eth1"]
+    # server access ports (MTU 1500)
+    - endpoints: ["leaf1:eth3", "lb1:eth1"]
+    - endpoints: ["leaf1:eth4", "web1:eth1"]
+    - endpoints: ["leaf1:eth5", "web2:eth1"]
+    - endpoints: ["leaf2:eth3", "db1:eth1"]
+    - endpoints: ["leaf2:eth4", "dns1:eth1"]

@@ -1,0 +1,14 @@
+#!/usr/sbin/nft -f
+# db1 host firewall: only the web tier may reach PostgreSQL.
+flush ruleset
+table inet host {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    iif "lo" accept
+    ct state established,related accept
+    iifname "eth0" accept comment "mgmt"
+    meta l4proto icmp accept
+    ip saddr 10.10.10.0/24 tcp dport 5432 accept comment "web tier -> postgres"
+    counter reject with icmpx admin-prohibited
+  }
+}

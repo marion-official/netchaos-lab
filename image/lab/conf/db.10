@@ -1,0 +1,34 @@
+$TTL 60
+@       IN SOA dns1.dc.lab. hostmaster.dc.lab. ( 2026092301 3600 600 86400 60 )
+        IN NS  dns1.dc.lab.
+; servers
+10.10.10  IN PTR lb1.dc.lab.
+11.10.10  IN PTR web1.dc.lab.
+12.10.10  IN PTR web2.dc.lab.
+10.20.10  IN PTR db1.dc.lab.
+10.30.10  IN PTR dns1.dc.lab.
+; gateways (SVIs)
+1.10.10   IN PTR leaf1-vlan10.dc.lab.
+1.20.10   IN PTR leaf2-vlan20.dc.lab.
+1.30.10   IN PTR leaf2-vlan30.dc.lab.
+; fabric point-to-points (so traceroute shows names)
+0.1.0     IN PTR spine1-eth1.dc.lab.
+1.1.0     IN PTR leaf1-eth1.dc.lab.
+2.1.0     IN PTR spine1-eth2.dc.lab.
+3.1.0     IN PTR leaf2-eth1.dc.lab.
+4.1.0     IN PTR spine1-eth3.dc.lab.
+5.1.0     IN PTR border-eth1.dc.lab.
+0.2.0     IN PTR spine2-eth1.dc.lab.
+1.2.0     IN PTR leaf1-eth2.dc.lab.
+2.2.0     IN PTR spine2-eth2.dc.lab.
+3.2.0     IN PTR leaf2-eth2.dc.lab.
+4.2.0     IN PTR spine2-eth3.dc.lab.
+5.2.0     IN PTR border-eth2.dc.lab.
+0.9.0     IN PTR border-eth3.dc.lab.
+1.9.0     IN PTR fw-inside.dc.lab.
+; loopbacks
+1.0.255   IN PTR spine1.dc.lab.
+2.0.255   IN PTR spine2.dc.lab.
+1.1.255   IN PTR leaf1.dc.lab.
+2.1.255   IN PTR leaf2.dc.lab.
+3.1.255   IN PTR border.dc.lab.

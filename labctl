@@ -1,0 +1,705 @@
+#!/usr/bin/env bash
+# labctl - drive the netchaos-lab troubleshooting environment.
+# Runs on Linux, where Docker + containerlab live: natively on Ubuntu, or inside a Linux VM on a Mac
+# (OrbStack or Lima). See docs/getting-started.md.
+set -uo pipefail
+VERSION=0.1.0
+
+if [ "$(uname -s)" != Linux ]; then
+  echo "labctl runs inside Linux. On a Mac, open the lab VM first (scripts/mac-vm.sh, then e.g." >&2
+  echo "'orb -m netchaos' or 'limactl shell netchaos') and run labctl from the clone inside it." >&2
+  exit 1
+fi
+
+LAB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LAB=dc
+IMAGE=netchaos/node:latest
+CLAB=${CLAB_BIN:-containerlab}
+STATE_DIR="$LAB_DIR/.state"
+STATE="$STATE_DIR/current"
+JOURNAL_DIR="$LAB_DIR/journal"
+SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+
+c_red=$'\e[31m'; c_grn=$'\e[32m'; c_yel=$'\e[33m'; c_dim=$'\e[2m'; c_bld=$'\e[1m'; c_off=$'\e[0m'
+say()  { printf '%s\n' "$*"; }
+ok()   { printf '%s✔%s %s\n' "$c_grn" "$c_off" "$*"; }
+bad()  { printf '%s✘%s %s\n' "$c_red" "$c_off" "$*"; }
+die()  { printf '%serror:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
+
+# run a command inside a node:  x <node> '<shell command>'
+# The ': labctl-internal;' prefix marks labctl's own commands (health checks, fault injection...)
+# so the command audit can tell them apart from what the investigator typed.
+x()  { docker exec "clab-$LAB-$1" bash -c ": labctl-internal; $2"; }
+# random element:  pick a b c
+# Called as $(pick ...) i.e. in a subshell, where bash's $RANDOM would never advance (every pick in
+# one run would return the same index). So: /dev/urandom normally, or a hash of the seed + the
+# choices when --seed is given (reproducible runs).
+pick() {
+  local a=("$@") r
+  if [ -n "${LAB_SEED:-}" ]; then r=$(printf '%s|%s' "$LAB_SEED" "$*" | cksum | cut -d' ' -f1)
+  else r=$(od -An -N4 -tu4 /dev/urandom | tr -d ' '); fi
+  echo "${a[r % ${#a[@]}]}"
+}
+
+# facts about the topology, for fault scripts
+leaf_of() { case $1 in lb1|web1|web2) echo leaf1;; db1|dns1) echo leaf2;; esac; }
+port_of() { case $1 in lb1) echo eth3;; web1) echo eth4;; web2) echo eth5;; db1) echo eth3;; dns1) echo eth4;; esac; }
+vlan_of() { case $1 in lb1|web1|web2) echo 10;; db1) echo 20;; dns1) echo 30;; esac; }
+ip_of()   { case $1 in lb1) echo 10.10.10.10;; web1) echo 10.10.10.11;; web2) echo 10.10.10.12;;
+                       db1) echo 10.10.20.10;; dns1) echo 10.10.30.10;; esac; }
+
+# tickets are written from the user's point of view: symptoms, never causes
+ticket_by_target() {
+  case $1 in
+    web1|web2) say "Monitoring alert: HAProxy on lb1 reports backend '$1' DOWN in pool be_web."
+               say "Customers are still served by the remaining node, but we have no redundancy." ;;
+    lb1)       say "shop.example.com is failing for ALL customers (timeouts / errors)."
+               say "The web and database servers look healthy on their dashboards." ;;
+    *)         say "shop.example.com returns errors (HTTP 503) for ALL customers."
+               say "Nobody has touched the web servers today." ;;
+  esac
+}
+
+running() { docker ps --format '{{.Names}}' | grep -q "^clab-$LAB-"; }
+need_running() { running || die "lab is not running (./labctl up)"; }
+
+# ---------------------------------------------------------------- inventory + ssh
+# "<node> <mgmt-ip> <role>" for every node, straight from the topology file
+inventory() {
+  sed -nE 's/^ +([a-z0-9-]+): *\{ *mgmt-ipv4: *([0-9.]+), *env: *\{ *ROLE: *([a-z]+).*/\1 \2 \3/p' "$LAB_DIR/topology.clab.yml"
+}
+
+SSH_KEY="$HOME/.ssh/netchaos_ed25519"
+SSH_CONF="$HOME/.ssh/netchaos.conf"
+
+# Push a lab key to every node and write an ssh config so "ssh web1" works from the VM.
+ssh_setup() {
+  command -v ssh-keygen >/dev/null || { bad "ssh client not installed (sudo apt install openssh-client) - skipping ssh setup"; return 1; }
+  mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+  [ -f "$SSH_KEY" ] || ssh-keygen -q -t ed25519 -N "" -C netchaos-lab -f "$SSH_KEY" || return 1
+  local n ip role pub ai=""; pub=$(cat "$SSH_KEY.pub")
+  # AI investigator key (ai/setup-ai.sh): same access, but tagged so its commands log as ai-*
+  [ -f "$LAB_DIR/ai/investigator.pub" ] && ai="environment=\"LAB_ACTOR=ai\" $(cat "$LAB_DIR/ai/investigator.pub")"
+  {
+    echo "# written by netchaos-lab/labctl - lab nodes via the out-of-band management network"
+    while read -r n ip role; do
+      printf 'Host %s dc-%s\n  HostName %s\n' "$n" "$n" "$ip"
+      x "$n" "mkdir -p /root/.ssh && printf '%s\n' '$pub' ${ai:+'$ai'} > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys" 2>/dev/null
+    done < <(inventory)
+    printf 'Host %s\n' "$(inventory | awk '{printf "%s dc-%s ", $1, $1}')"
+    printf '  User root\n  IdentityFile %s\n  IdentitiesOnly yes\n' "$SSH_KEY"
+    printf '  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n'
+  } > "$SSH_CONF"
+  touch "$HOME/.ssh/config"
+  if ! grep -q "Include $SSH_CONF" "$HOME/.ssh/config"; then
+    # Include must come before any Host block, so prepend it
+    { echo "Include $SSH_CONF"; cat "$HOME/.ssh/config"; } > "$HOME/.ssh/config.new" && mv "$HOME/.ssh/config.new" "$HOME/.ssh/config"
+    chmod 600 "$HOME/.ssh/config"
+  fi
+}
+
+# ---------------------------------------------------------------- command audit
+# Every command the investigator runs is logged, whichever way they reach a node:
+#   interactive bash (ssh, docker exec -it, labctl shell) and 'ssh node cmd' -> logged inside the
+#   node by audit/node-setup.sh ; 'docker exec node cmd' one-offs -> docker events recorder below.
+# audit_collect merges it all into journal/<ts>.commands.log (TSV, UTC):
+#   time_utc  node  source  exit_code  cwd  command
+audit_setup() {
+  local n _ip _role
+  while read -r n _ip _role; do
+    docker exec -i "clab-$LAB-$n" bash -s labctl-internal < "$LAB_DIR/audit/node-setup.sh" >/dev/null 2>&1 \
+      || bad "command audit setup failed on $n"
+  done < <(inventory)
+}
+
+recorder_start() {
+  recorder_stop
+  mkdir -p "$STATE_DIR"; : > "$STATE_DIR/docker-exec.raw"
+  # setsid+nohup: keeps recording if this terminal closes; stopped at check/down
+  setsid nohup docker events --since "$START" --filter type=container --filter event=exec_start \
+    --format '{{.TimeNano}}|{{.Actor.Attributes.name}}|{{.Action}}' \
+    >> "$STATE_DIR/docker-exec.raw" 2>/dev/null < /dev/null &
+  echo $! > "$STATE_DIR/recorder.pid"
+}
+
+recorder_stop() {
+  local pid; pid=$(cat "$STATE_DIR/recorder.pid" 2>/dev/null) || return 0
+  kill "$pid" 2>/dev/null; rm -f "$STATE_DIR/recorder.pid"
+}
+
+audit_collect() {   # needs JOURNAL and START (from the incident state)
+  [ -n "${JOURNAL:-}" ] && [ -n "${START:-}" ] || return 0
+  running || return 0
+  local out="${JOURNAL%.md}.commands.log" since n _ip _role f
+  since=$(date -u -d "@$START" +%Y-%m-%dT%H:%M:%SZ)
+  {
+    # parts saved by 'labctl recover' (commands typed before the lab was redeployed)
+    cat "${JOURNAL%.md}".commands.part*.log 2>/dev/null | grep -v '^#'
+    # docker exec one-offs seen by the recorder (interactive 'bash' sessions show as 'bash')
+    if [ -f "$STATE_DIR/docker-exec.raw" ]; then
+      grep -v 'labctl-internal' "$STATE_DIR/docker-exec.raw" | while IFS='|' read -r ns name action; do
+        [ "${ns:-0}" -ge $((START * 1000000000)) ] 2>/dev/null || continue
+        printf '%s\t%s\tdocker-exec\t-\t-\t%s\n' "$(date -u -d "@$((ns / 1000000000))" +%Y-%m-%dT%H:%M:%SZ)" \
+          "${name#clab-$LAB-}" "${action#exec_start: }"
+      done
+    fi
+    while read -r n _ip _role; do
+      x "$n" "awk -F'\t' -v s='$since' '\$1 >= s' /var/log/lab/commands.log 2>/dev/null"
+    done < <(inventory)
+  } | sort -s -t $'\t' -k1,1 > "$out.tmp"     # stable: keeps each node's own order within a second
+  { printf '# commands typed during incident %s (UTC). Columns: time node source exit_code cwd command\n' "$(basename "$JOURNAL" .md)"
+    printf '# source: shell = interactive bash (ssh / docker exec -it), labctl-shell, ssh = interactive ssh, ssh-cmd = ssh node cmd, docker-exec = docker exec node cmd\n'
+    cat "$out.tmp"; } > "$out"
+  rm -f "$out.tmp"
+  # interactive ssh sessions also have their output recorded inside the node
+  while read -r n _ip _role; do
+    for f in $(x "$n" "find /var/log/lab/tty -type f -newermt @$START 2>/dev/null"); do
+      docker cp -q "clab-$LAB-$n:$f" "${JOURNAL%.md}-ssh-$n-$(basename "$f")" 2>/dev/null
+    done
+  done < <(inventory)
+}
+
+cmd_commands() {   # show the investigator's command log for the open (or last) incident
+  if [ -f "$STATE" ]; then load_state >/dev/null; else
+    [ -f "$STATE_DIR/last" ] || die "no incident yet"; eval "$(base64 -d < "$STATE_DIR/last")"; fi
+  audit_collect
+  column -t -s $'\t' "${JOURNAL%.md}.commands.log" 2>/dev/null || cat "${JOURNAL%.md}.commands.log"
+}
+
+# After a host/VM restart the containers lose their veth "cables" and come back broken (or not at
+# all). 'recover' keeps the open incident: it saves the commands typed so far, redeploys the lab
+# cleanly and re-injects the SAME fault with the SAME parameters. Journal, hints and timer continue.
+salvage_commands() {   # works on running AND stopped containers (docker cp)
+  local part=$1 since n _ip _role f
+  since=$(date -u -d "@$START" +%Y-%m-%dT%H:%M:%SZ)
+  {
+    printf '# commands typed before the lab was redeployed at %s (labctl recover)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    while read -r n _ip _role; do
+      docker cp "clab-$LAB-$n:/var/log/lab/commands.log" - 2>/dev/null | tar -xO 2>/dev/null \
+        | awk -F'\t' -v s="$since" '$1 >= s'
+    done < <(inventory)
+    if [ -f "$STATE_DIR/docker-exec.raw" ]; then
+      grep -v 'labctl-internal' "$STATE_DIR/docker-exec.raw" | while IFS='|' read -r ns name action; do
+        [ "${ns:-0}" -ge $((START * 1000000000)) ] 2>/dev/null || continue
+        printf '%s\t%s\tdocker-exec\t-\t-\t%s\n' "$(date -u -d "@$((ns / 1000000000))" +%Y-%m-%dT%H:%M:%SZ)" \
+          "${name#clab-$LAB-}" "${action#exec_start: }"
+      done
+    fi
+  } > "$part"
+  # output recordings of interactive ssh sessions
+  while read -r n _ip _role; do
+    docker cp "clab-$LAB-$n:/var/log/lab/tty" - 2>/dev/null | tar -t 2>/dev/null | grep -E '\.log$' | while read -r f; do
+      docker cp "clab-$LAB-$n:/var/log/lab/$f" - 2>/dev/null | tar -xO > "${JOURNAL%.md}-ssh-$n-$(basename "$f")" 2>/dev/null
+    done
+  done < <(inventory)
+}
+
+cmd_recover() {
+  [ -f "$STATE" ] || die "no open incident - for a clean lab just run ./labctl reset"
+  load_state
+  local v6="" n=1 part
+  ipv6_on && v6="--ipv6"
+  while [ -e "${JOURNAL%.md}.commands.part$n.log" ]; do n=$((n + 1)); done
+  part="${JOURNAL%.md}.commands.part$n.log"
+  say "saving the commands typed so far..."
+  salvage_commands "$part" && ok "saved $(grep -vc '^#' "$part") commands to ${part#"$LAB_DIR"/}"
+  cp "$STATE" "$STATE_DIR/recover.state"
+  recorder_stop
+  say "redeploying the lab..."
+  (cd "$LAB_DIR" && $SUDO $CLAB destroy -t topology.clab.yml --cleanup) >/dev/null 2>&1 || true
+  rm -f "$STATE"
+  say "(if the redeploy fails, your incident is saved in .state/recover.state)"
+  cmd_up $v6                      # exits on a failed deploy
+  cp "$STATE_DIR/recover.state" "$STATE"
+  load_state
+  audit_setup
+  declare -F fault_refresh >/dev/null && fault_refresh     # re-read details that change on redeploy
+  local pvars; pvars=$(compgen -v P_ | tr '\n' ' ')
+  # shellcheck disable=SC2086
+  save_state FAULT_ID START HINTS_USED JOURNAL $pvars
+  fault_inject >/dev/null 2>&1
+  sleep 3
+  local back=0
+  if fault_verify >/dev/null 2>&1; then
+    bad "the fault did not come back after the redeploy - better to start a new incident (./labctl reset)"
+    back=1
+  else
+    ok "the same fault is back in place"
+  fi
+  recorder_start
+  printf '\n> **Note:** the lab was redeployed at %s (labctl recover, after a host restart). The fault was re-injected with the same parameters; commands from before are in %s.\n' \
+    "$(date '+%Y-%m-%d %H:%M')" "$(basename "$part")" >> "$JOURNAL"
+  rm -f "$STATE_DIR/recover.state"
+  cmd_ticket
+  return $back
+}
+
+# ---------------------------------------------------------------- health probes
+ROUTERS="spine1 spine2 leaf1 leaf2 border"
+
+# customer view: 20 page loads + one large download, from the internet
+probe_customer() {
+  x inet-client '
+    ok=0; t=0
+    for i in $(seq 1 20); do
+      r=$(curl -4 -s -o /dev/null -m 3 -w "%{http_code} %{time_total}" http://shop.example.com/)
+      [ "${r%% *}" = 200 ] && ok=$((ok+1))
+      t=$(awk -v a="$t" -v b="${r##* }" "BEGIN{print a+b}")
+    done
+    avg=$(awk -v t="$t" "BEGIN{printf \"%.2f\", t/20}")
+    rep=$(curl -4 -s -o /dev/null -m 8 -w "%{http_code} %{size_download}" http://shop.example.com/report)
+    echo "$ok $avg ${rep%% *} ${rep##* }"'
+}
+
+ipv6_on() { [ -f "$STATE_DIR/ipv6" ]; }
+
+# same customer view over IPv6 (dual-stack mode only): 10 page loads + one large download
+probe_customer6() {
+  x inet-client '
+    ok=0
+    for i in $(seq 1 10); do
+      r=$(curl -6 -s -o /dev/null -m 3 -w "%{http_code}" http://shop.example.com/)
+      [ "$r" = 200 ] && ok=$((ok+1))
+    done
+    rep=$(curl -6 -s -o /dev/null -m 8 -w "%{http_code} %{size_download}" http://shop.example.com/report)
+    echo "$ok ${rep%% *} ${rep##* }"'
+}
+
+# returns 0 if the customer is happy; prints a summary line
+health_customer() {
+  local out ok avg rc rsize
+  out=$(probe_customer 2>/dev/null) || out="0 9.99 000 0"
+  read -r ok avg rc rsize <<<"$out"
+  local good=0
+  [ "$ok" = 20 ] && awk -v a="$avg" 'BEGIN{exit !(a < 0.5)}' && [ "$rc" = 200 ] && [ "$rsize" -gt 1000000 ] && good=1
+  local line="homepage $ok/20 OK, avg ${avg}s; /report HTTP $rc (${rsize} bytes)"
+  if [ $good = 1 ]; then ok "customer view (IPv4): $line"; else bad "customer view (IPv4): $line"; fi
+  if ipv6_on; then
+    local out6 ok6 rc6 rsize6 good6=0
+    out6=$(probe_customer6 2>/dev/null) || out6="0 000 0"
+    read -r ok6 rc6 rsize6 <<<"$out6"
+    [ "$ok6" = 10 ] && [ "$rc6" = 200 ] && [ "${rsize6:-0}" -gt 1000000 ] && good6=1
+    line="homepage $ok6/10 OK; /report HTTP $rc6 (${rsize6} bytes)"
+    if [ $good6 = 1 ]; then ok "customer view (IPv6): $line"; else bad "customer view (IPv6): $line"; good=0; fi
+  fi
+  [ $good = 1 ]
+}
+
+# internal checks (spoilers! used by selftest and after a fault is resolved)
+health_internal() {
+  local fail=0 r s
+  for r in $ROUTERS; do
+    s=$(x "$r" "vtysh -c 'show bgp summary json' | jq -r '[.[] | (.peers? // {}) | .[] | .state] | map(select(. != \"Established\")) | length'" 2>/dev/null)
+    [ "$s" = 0 ] || { bad "bgp: $r has sessions not Established"; fail=1; }
+  done
+  s=$(x lb1 'echo "show stat" | socat - /run/haproxy/admin.sock' 2>/dev/null | awk -F, '$1=="be_web" && $2 ~ /^web/ && $18 != "UP" {print $2}')
+  [ -z "$s" ] || { bad "haproxy: backend(s) not UP: $s"; fail=1; }
+  for r in web1 web2; do
+    s=$(x "$r" 'getent hosts db1.dc.lab | cut -d" " -f1' 2>/dev/null)
+    [ "$s" = 10.10.20.10 ] || { bad "dns: $r resolves db1.dc.lab to '${s:-nothing}'"; fail=1; }
+  done
+  [ $fail = 0 ] && ok "internal: bgp, haproxy backends, dns all fine"
+  return $fail
+}
+
+wait_healthy() {  # wait_healthy <timeout seconds>
+  local deadline=$(( $(date +%s) + ${1:-120} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    health_internal >/dev/null 2>&1 && health_customer >/dev/null 2>&1 && return 0
+    sleep 3
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------- state
+save_state() { mkdir -p "$STATE_DIR"; declare -p "$@" | sed "s/^declare /declare -g /" | base64 > "$STATE"; }  # base64: no accidental spoilers
+load_state() {
+  [ -f "$STATE" ] || die "no active fault. Start one with: ./labctl break"
+  eval "$(base64 -d < "$STATE")"
+  load_fault "$FAULT_ID"
+}
+load_fault() {
+  local f="$LAB_DIR/faults/$1.sh"; [ -f "$f" ] || die "unknown fault: $1"
+  unset -f fault_pick fault_ticket fault_inject fault_verify fault_hints fault_solution fault_fix fault_supported fault_refresh
+  fault_supported() { return 0; }   # faults may override: e.g. needs a kernel feature
+  # shellcheck source=/dev/null
+  source "$f"
+}
+fault_ids() { # fault_ids [level]
+  local f; for f in "$LAB_DIR"/faults/*.sh; do
+    if [ -n "${1:-}" ]; then grep -q "^FAULT_LEVEL=$1\$" "$f" || continue; fi
+    basename "$f" .sh
+  done
+}
+
+# ---------------------------------------------------------------- commands
+cmd_build() { docker build -t "$IMAGE" "$LAB_DIR/image"; }
+
+# Environment check, for setup problems and bug reports. Prints facts, changes nothing.
+cmd_doctor() {
+  local rc=0
+  chk() {
+    if eval "$2" >/dev/null 2>&1; then ok "$1"
+    elif [ "${4:-}" = warn ]; then printf '%s!%s %s\n' "$c_yel" "$c_off" "$1${3:+ - $3}"
+    else bad "$1${3:+ - $3}"; rc=1; fi
+  }
+  say "netchaos-lab $VERSION on $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown Linux}"), kernel $(uname -r), $(uname -m)"
+  chk "docker installed"                "command -v docker"                          "run scripts/setup-host.sh"
+  chk "docker usable without sudo"      "docker info"                                "add yourself to the docker group and log in again"
+  chk "containerlab installed"          "command -v $CLAB"                           "run scripts/setup-host.sh"
+  chk "ssh client"                      "command -v ssh && command -v ssh-keygen"    "apt install openssh-client"
+  chk "script (session recording)"      "command -v script"                          "apt install util-linux"
+  chk "node image built"                "docker image inspect $IMAGE"                "./labctl build (or ./labctl up builds it)" warn
+  chk "IPv6 in this kernel"             "[ -f /proc/sys/net/ipv6/conf/all/disable_ipv6 ]" "needed only for ./labctl up --ipv6" warn
+  chk "netem (latency/loss fault)"      "modinfo sch_netem || [ -d /sys/module/sch_netem ]" "that fault will be skipped" warn
+  chk "802.1q VLANs"                    "modinfo 8021q || [ -d /sys/module/8021q ]"  "leaves fall back to one bridge per VLAN" warn
+  chk "free memory >= 3 GB"             "[ \$(awk '/MemAvailable/ {print int(\$2/1048576)}' /proc/meminfo) -ge 3 ]" "the lab needs ~2-3 GB" warn
+  if running 2>/dev/null; then ok "lab running ($(docker ps -q --filter "name=clab-$LAB-" | wc -l) containers)"; else say "  lab not running"; fi
+  [ -f "$STATE" ] && say "  an incident is open" || true
+  return $rc
+}
+
+cmd_up() {
+  local broken="" level="" v6=""
+  while [ $# -gt 0 ]; do case $1 in --broken) broken=1;; --level) level=$2; shift;; --ipv6) v6=1;;
+    *) die "unknown option '$1' (up [--ipv6] [--broken [--level N]])";; esac; shift; done
+  mkdir -p "$STATE_DIR"
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || cmd_build
+  running && die "lab already running (./labctl reset to start clean)"
+  (cd "$LAB_DIR" && $SUDO $CLAB deploy --reconfigure -t topology.clab.yml) || die "deploy failed"
+  say "waiting for the fabric to converge and services to come up..."
+  rm -f "$STATE_DIR/ipv6"
+  if [ -n "$v6" ]; then ipv6_setup || bad "IPv6 setup had errors (see above)"; fi
+  audit_setup
+  ssh_setup && ok "ssh ready: try 'ssh web1' (see ./labctl nodes)"
+  local rc=0
+  if wait_healthy 180; then ok "lab is up and healthy"; else bad "lab did not become healthy - run ./labctl selftest"; rc=1; fi
+  if [ -n "$broken" ]; then cmd_break ${level:+--level "$level"}; fi
+  return $rc
+}
+
+cmd_down() {
+  if [ -f "$STATE" ] && running; then   # incident still open: save its command log first
+    load_state >/dev/null 2>&1 && { audit_collect; say "command log saved: ${JOURNAL%.md}.commands.log"; }
+  fi
+  recorder_stop
+  (cd "$LAB_DIR" && $SUDO $CLAB destroy -t topology.clab.yml --cleanup) || true
+  rm -f "$STATE" "$STATE_DIR/ipv6"
+}
+
+# Dual-stack mode: run ipv6/node-setup.sh on every node (see that file for the addressing plan)
+ipv6_setup() {
+  [ -f /proc/sys/net/ipv6/conf/all/disable_ipv6 ] || { bad "this kernel has no IPv6 - staying IPv4-only"; return 1; }
+  say "enabling IPv6 (dual-stack)..."
+  local n _ip _role rc=0
+  while read -r n _ip _role; do
+    docker exec -i "clab-$LAB-$n" bash -s labctl-internal < "$LAB_DIR/ipv6/node-setup.sh" >/dev/null 2>"$STATE_DIR/ipv6-$n.err" || rc=1
+    [ -s "$STATE_DIR/ipv6-$n.err" ] && { bad "ipv6 on $n:"; sed 's/^/    /' "$STATE_DIR/ipv6-$n.err"; rc=1; }
+    rm -f "$STATE_DIR/ipv6-$n.err"
+  done < <(inventory)
+  mkdir -p "$STATE_DIR"; touch "$STATE_DIR/ipv6"
+  return $rc
+}
+
+cmd_reset() { cmd_down; cmd_up "$@"; }
+
+cmd_status() {
+  need_running
+  health_customer
+  [ -f "$STATE" ] && say "${c_dim}(a fault is active - ./labctl ticket)${c_off}"
+  return 0
+}
+
+cmd_selftest() {
+  need_running
+  local rc=0
+  health_internal || rc=1
+  health_customer || rc=1
+  return $rc
+}
+
+cmd_break() {
+  need_running
+  local level="" id="" seed=""; INVESTIGATOR=human
+  while [ $# -gt 0 ]; do
+    case $1 in --level) level=$2; shift;; --fault) id=$2; shift;; --seed) seed=$2; shift;;
+               --investigator) INVESTIGATOR=$2; shift;;
+               *) die "unknown option '$1' (break [--level N] [--fault ID] [--seed N] [--investigator WHO])";; esac; shift
+  done
+  [ -f "$STATE" ] && die "a fault is already active (./labctl ticket, or ./labctl reset)"
+  [ -n "$seed" ] && export LAB_SEED=$seed
+  if [ -z "$id" ]; then
+    local cand=() c
+    for c in $(fault_ids "$level"); do load_fault "$c"; fault_supported >/dev/null 2>&1 && cand+=("$c"); done
+    [ ${#cand[@]} -gt 0 ] || die "no usable faults for level '$level'"
+    id=$(pick "${cand[@]}")
+  fi
+  load_fault "$id"
+  fault_supported >/dev/null 2>&1 || die "fault '$id' can't run here (needs ./labctl up --ipv6, or a kernel feature this VM lacks)"
+  FAULT_ID=$id
+  audit_setup                     # make sure every node logs commands (idempotent)
+  ssh_setup >/dev/null 2>&1        # (re)install keys, incl. the AI investigator's if set up
+  fault_pick                      # sets P_* variables
+  fault_inject >/dev/null 2>&1
+  START=$(date +%s); HINTS_USED=0
+  recorder_start
+  mkdir -p "$JOURNAL_DIR"
+  JOURNAL="$JOURNAL_DIR/$(date +%Y%m%d-%H%M%S).md"
+  local pvars; pvars=$(compgen -v P_ | tr '\n' ' ')
+  # shellcheck disable=SC2086
+  save_state FAULT_ID START HINTS_USED JOURNAL $pvars
+  write_journal_header
+  cmd_ticket
+}
+
+write_journal_header() {
+  cat > "$JOURNAL" <<EOF
+# Incident $(basename "$JOURNAL" .md)
+
+**Opened:** $(date '+%Y-%m-%d %H:%M')  |  **Level:** $FAULT_LEVEL  |  **Investigator:** $INVESTIGATOR  <!-- human | ai | ai+method | human+ai -->
+
+## Ticket
+$(fault_ticket)
+
+## 1. Identify the problem
+<!-- What exactly is broken, for whom, since when? What still works? -->
+
+## 2. Theory of probable cause
+<!-- List hypotheses, most likely first. -->
+
+## 3. Test the theory
+<!-- Commands you ran and what they showed. Paste the interesting output. -->
+
+## 4. Plan of action
+<!-- What will you change, what's the rollback? -->
+
+## 5. Implement
+<!-- Exact commands / config changes. -->
+
+## 6. Verify full functionality
+<!-- How did you prove it's fixed (./labctl check + your own checks)? -->
+
+## 7. Document (postmortem)
+
+### Root cause, in one sentence
+
+
+### Causal chain
+<!-- One line per link, each with the evidence that proved it (command + output).
+     "External / unknown" is a valid answer when the evidence says so - don't invent a story. -->
+- **Symptom:**
+- **Immediate cause:**
+- **Underlying cause:**
+- **Contributing factors:**
+
+### Remedy
+- **Fix applied** (what restored the service):
+- **Persistent?** (survives a service restart, a reboot, a config-management run? if not, what makes it persistent)
+- **Change that removes the root cause for good:**
+
+### Detection
+<!-- Which alert or monitor would have caught this earlier, or pointed straight at the cause?
+     Be specific: what metric/check, on which box, with which threshold. -->
+
+### Prevention
+<!-- Which change, guard rail or check stops this happening again?
+     (validation before deploy, config review, automation, removing a single point of failure ...) -->
+
+### What I'd do differently next time
+
+
+### Difficulty
+<!-- Labelled level vs how it felt (1-3), and what made it easy or hard. Used to recalibrate the levels. -->
+- **Felt like level:**
+- **Why:**
+
+
+EOF
+}
+
+cmd_ticket() {
+  load_state
+  printf '\n%s🎫 TICKET%s  (level %s)\n\n' "$c_bld" "$c_off" "$FAULT_LEVEL"
+  fault_ticket | sed 's/^/   /'
+  local mins=$(( ($(date +%s) - START) / 60 ))
+  printf '\n%s   open for %d min · hints used %d · journal: %s%s\n' "$c_dim" "$mins" "$HINTS_USED" "${JOURNAL#"$LAB_DIR"/}" "$c_off"
+  printf '%s   ./labctl hint | check | reveal%s\n\n' "$c_dim" "$c_off"
+}
+
+cmd_hint() {
+  load_state
+  mapfile -t hints < <(fault_hints)
+  if [ "$HINTS_USED" -ge "${#hints[@]}" ]; then
+    say "No more hints. ./labctl reveal if you're stuck."
+  else
+    HINTS_USED=$((HINTS_USED + 1))
+    printf '%s💡 hint %d/%d:%s %s\n' "$c_yel" "$HINTS_USED" "${#hints[@]}" "$c_off" "${hints[HINTS_USED-1]}"
+    local pvars; pvars=$(compgen -v P_ | tr '\n' ' ')
+    # shellcheck disable=SC2086
+    save_state FAULT_ID START HINTS_USED JOURNAL $pvars
+  fi
+}
+
+cmd_check() {
+  load_state
+  local good=1
+  health_customer || good=0
+  if fault_verify >/dev/null 2>&1; then :; else good=0; bad "the root cause is still there (or only partly fixed)"; fi
+  if [ $good = 1 ] && health_internal >/dev/null 2>&1; then
+    local mins=$(( ($(date +%s) - START) / 60 ))
+    printf '\n%s🎉 RESOLVED%s in %d min with %d hint(s). Fault: %s\n' "$c_grn" "$c_off" "$mins" "$HINTS_USED" "$FAULT_ID"
+    finish_journal "resolved in ${mins} min, ${HINTS_USED} hint(s)"
+    say "Now fill in the 7 steps in ${JOURNAL#"$LAB_DIR"/} while it's fresh."
+    say "Read the reference solution with: ./labctl solution"
+    recorder_stop
+    audit_collect
+    mv "$STATE" "$STATE_DIR/last"
+  else
+    say "Not fixed yet. Keep going (./labctl hint if stuck)."
+    return 1
+  fi
+}
+
+finish_journal() {
+  { echo; echo "---"; echo "**Result:** $1  |  **Fault id:** \`$FAULT_ID\`"; echo; } >> "$JOURNAL"
+  audit_collect
+  # Ground truth for later review (e.g. the postmortem jury): sealed next to the journal, written
+  # only once the incident is resolved or revealed. Spoilers, by design.
+  local sol="${JOURNAL%.md}.solution.md" v
+  if [ ! -f "$sol" ]; then
+    {
+      echo "# Ground truth: $(basename "$JOURNAL" .md)"
+      echo
+      echo "- fault_id: $FAULT_ID"
+      echo "- level: $FAULT_LEVEL"
+      echo "- layer: $FAULT_LAYER"
+      echo "- opened: $(date -d "@$START" -Is)"
+      echo "- ipv6_mode: $(ipv6_on && echo yes || echo no)"
+      echo "- parameters: $(for v in $(compgen -v P_); do printf '%s=%s ' "$v" "${!v}"; done)"
+      echo
+      echo "## Reference solution"
+      echo
+      echo '```'
+      fault_solution
+      echo '```'
+      echo
+      echo "## Outcome log"
+      echo
+    } > "$sol"
+  fi
+  echo "- $(date -Is): $1, hints used: $HINTS_USED" >> "$sol"
+}
+
+cmd_reveal() {
+  load_state
+  printf '%sGiving up is fine - reading the solution is part of learning.%s\n\n' "$c_dim" "$c_off"
+  fault_solution
+  finish_journal "revealed after $(( ($(date +%s) - START) / 60 )) min, ${HINTS_USED} hint(s)"
+  say; say "Try applying the fix yourself, then ./labctl check. (Or ./labctl reset for a clean lab.)"
+}
+
+cmd_solution() {  # solution for the last resolved fault
+  [ -f "$STATE_DIR/last" ] || die "nothing resolved yet"
+  eval "$(base64 -d < "$STATE_DIR/last")"; load_fault "$FAULT_ID"; fault_solution
+}
+
+cmd_shell() {
+  need_running
+  [ -n "${1:-}" ] || die "usage: ./labctl shell <node>"
+  docker ps --format '{{.Names}}' | grep -qx "clab-$LAB-$1" || die "no such node: $1 (./labctl nodes)"
+  # timestamped prompt, so recordings show how long each step took
+  local cmd=(docker exec -it -e LAB_SRC=labctl-shell "clab-$LAB-$1" bash)
+  if [ -f "$STATE" ] && command -v script >/dev/null; then
+    # while a fault is active, record the session next to the incident journal
+    eval "$(base64 -d < "$STATE")"
+    local log="${JOURNAL%.md}-$1.log"
+    printf '%s(recording to %s)%s\n' "$c_dim" "${log#"$LAB_DIR"/}" "$c_off"
+    printf '\n===== %s shell on %s =====\n' "$(date -Is)" "$1" >> "$log"
+    script -q -f -a -c "$(printf '%q ' "${cmd[@]}")" "$log"
+  else
+    "${cmd[@]}"
+  fi
+}
+
+cmd_nodes() {
+  need_running
+  local n ip role st data
+  printf '%s%-12s %-9s %-8s %-15s %s%s\n' "$c_bld" NODE ROLE STATE MGMT "DATA-PLANE ADDRESSES" "$c_off"
+  while read -r n ip role; do
+    st=$(docker inspect -f '{{.State.Status}}' "clab-$LAB-$n" 2>/dev/null || echo missing)
+    data=$(x "$n" "ip -o addr show scope global | awk '\$2!=\"eth0\" {printf \"%s:%s \", \$2, \$4}'" 2>/dev/null)
+    printf '%-12s %-9s %-8s %-15s %s\n' "$n" "$role" "$st" "$ip" "$data"
+  done < <(inventory)
+  printf '\n%sssh <node>  |  ./labctl shell <node> (recorded)  |  docker exec -it clab-%s-<node> bash%s\n' "$c_dim" "$LAB" "$c_off"
+}
+
+# Inject every fault, confirm it breaks something, apply the reference fix, confirm recovery.
+# Contains spoilers in its output - it's for maintaining the lab, not for learning.
+cmd_selftest_faults() {
+  need_running
+  local id pass=0 failn=0 failed=()
+  local list; list=${*:-$(fault_ids)}
+  for id in $list; do
+    load_fault "$id"; FAULT_ID=$id
+    if ! fault_supported >/dev/null 2>&1; then say "- $id SKIPPED (needs --ipv6 mode or a missing kernel feature)"; continue; fi
+    unset "${!P_@}" 2>/dev/null; fault_pick; fault_inject >/dev/null 2>&1
+    sleep 8
+    local broke=1
+    if health_customer >/dev/null 2>&1 && health_internal >/dev/null 2>&1; then broke=0; fi
+    fault_verify >/dev/null 2>&1 && broke=0
+    fault_fix >/dev/null 2>&1
+    if [ $broke = 1 ] && wait_healthy 120 && fault_verify >/dev/null 2>&1; then
+      ok "$id ($(compgen -v P_ | while read -r v; do printf '%s=%s ' "$v" "${!v}"; done))"; pass=$((pass+1))
+    else
+      bad "$id broke=$broke ($(compgen -v P_ | while read -r v; do printf '%s=%s ' "$v" "${!v}"; done))"
+      failn=$((failn+1)); failed+=("$id")
+      wait_healthy 60 || { say "lab unhealthy, stopping"; break; }
+    fi
+  done
+  say "passed $pass, failed $failn ${failed[*]:-}"
+  [ $failn = 0 ]
+}
+
+usage() {
+  cat <<EOF
+${c_bld}labctl${c_off} $VERSION - netchaos-lab, a datacenter to break and fix
+
+  doctor                     check this machine's prerequisites (paste it into bug reports)
+  build                      build the node image
+  up [--ipv6] [--broken [--level N]]
+                             deploy the lab (--ipv6: dual-stack; --broken: start with a random fault)
+  down                       destroy the lab
+  reset                      destroy + deploy clean
+  recover                    after a Mac/VM restart: redeploy, keep the open incident, re-inject its fault
+  status                     what a customer sees right now
+  nodes                      list nodes: role, state, mgmt IP, data-plane IPs
+  shell <node>               open a shell on a node (output recorded while a fault is active)
+  commands                   every command typed during the current incident, on any node
+
+  break [--level 1|2|3] [--fault ID] [--seed N] [--investigator human|ai|ai+method|human+ai]
+                             inject a random fault
+  ticket                     show the current ticket
+  hint                       reveal the next hint (they get more specific)
+  check                      am I done?
+  reveal                     give up and show the solution
+  solution                   show the solution of the last resolved fault
+
+  selftest                   internal health (spoilers)
+  selftest-faults [IDs]      maintainers: inject/fix every fault (spoilers)
+EOF
+}
+
+cmd=${1:-help}; shift || true
+case $cmd in --version|-V|version) echo "netchaos-lab $VERSION"; exit 0 ;; esac
+case $cmd in
+  build|up|down|reset|status|nodes|shell|break|ticket|hint|check|reveal|solution|selftest|commands|recover|doctor)
+    "cmd_$cmd" "$@" ;;
+  selftest-faults) cmd_selftest_faults "$@" ;;
+  ssh-setup) need_running; ssh_setup && ok "ssh keys installed on all nodes" ;;
+  journal-path)   # current incident's journal, or the last one (used by ai/labctl-ai)
+    if [ -f "$STATE" ]; then eval "$(base64 -d < "$STATE")"
+    elif [ -f "$STATE_DIR/last" ]; then eval "$(base64 -d < "$STATE_DIR/last")"
+    else die "no incident yet"; fi
+    echo "$JOURNAL" ;;
+  *) usage ;;
+esac

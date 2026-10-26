@@ -1,0 +1,12 @@
+options {
+    directory "/var/cache/bind";
+    listen-on { any; };
+    listen-on-v6 { none; };
+    allow-query { any; };
+    recursion no;              // authoritative only: there is no internet here
+    dnssec-validation no;
+};
+logging {
+    channel qlog { file "/var/log/named/queries.log" versions 2 size 5m; print-time yes; };
+    category queries { qlog; };
+};

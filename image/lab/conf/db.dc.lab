@@ -1,0 +1,17 @@
+$TTL 60
+@       IN SOA dns1.dc.lab. hostmaster.dc.lab. ( 2026092301 3600 600 86400 60 )
+        IN NS  dns1.dc.lab.
+; servers
+lb1     IN A   10.10.10.10
+shop    IN A   10.10.10.10
+web1    IN A   10.10.10.11
+web2    IN A   10.10.10.12
+db1     IN A   10.10.20.10
+dns1    IN A   10.10.30.10
+; network gear (loopbacks)
+spine1  IN A   10.255.0.1
+spine2  IN A   10.255.0.2
+leaf1   IN A   10.255.1.1
+leaf2   IN A   10.255.1.2
+border  IN A   10.255.1.3
+fw      IN A   10.0.9.1

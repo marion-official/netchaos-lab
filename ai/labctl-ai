@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# labctl-ai: the ONLY door from the AI investigator's user into the lab tooling.
+# It runs as the lab owner via sudo (rule installed by ai/setup-ai.sh) and allows a short list of
+# commands, so the AI gets what a human gets from the ticket and nothing that reveals answers.
+# Inside the VM the AI calls it as:  lab <command>
+set -uo pipefail
+LAB_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+L="$LAB_DIR/labctl"
+journal() { "$L" journal-path 2>/dev/null || { echo "no incident yet" >&2; exit 1; }; }
+MAX=$((512 * 1024))
+
+case ${1:-help} in
+  ticket|status|check|hint|nodes)
+    exec "$L" "$1" ;;
+  journal)                       # print the incident journal (template to fill in)
+    cat "$(journal)" ;;
+  submit-journal)                # replace the journal with stdin, keeping labctl's result footer
+    j=$(journal); new=$(head -c $MAX)
+    [ -n "$new" ] || { echo "empty journal refused" >&2; exit 1; }
+    footer=$(grep -E '^\*\*Result:\*\*' "$j" || true)
+    { printf '%s\n' "$new"
+      while IFS= read -r line; do
+        if [ -n "$line" ] && ! grep -qF -- "$line" <<<"$new"; then printf '\n---\n%s\n' "$line"; fi
+      done <<<"$footer"; } > "$j.tmp" || { rm -f "$j.tmp"; echo "could not write the journal" >&2; exit 1; }
+    mv "$j.tmp" "$j" || { echo "could not save the journal" >&2; exit 1; }
+    echo "journal saved: $(basename "$j")" ;;
+  save-transcript)               # AI session transcript (from the SessionEnd hook)
+    j=$(journal); n=1
+    while [ -e "${j%.md}-ai-transcript-$n.jsonl" ]; do n=$((n + 1)); done
+    head -c $((50 * 1024 * 1024)) > "${j%.md}-ai-transcript-$n.jsonl"
+    echo "transcript saved: $(basename "${j%.md}")-ai-transcript-$n.jsonl" ;;
+  ai-log)                        # one JSON line per tool call (from the PostToolUse hooks)
+    j=$(journal) || exit 0
+    head -c 65536 | tr -d '\n' >> "${j%.md}.ai-tools.jsonl"; echo >> "${j%.md}.ai-tools.jsonl" ;;
+  *)
+    cat >&2 <<HELP
+lab - the AI investigator's access to the lab
+  lab ticket            the incident ticket
+  lab status            what customers see right now
+  lab nodes             nodes, roles and addresses
+  lab hint              next hint (counted, like for humans)
+  lab check             is it fixed? (symptom gone AND root cause removed)
+  lab journal           print the incident journal (the 7-step template)
+  lab submit-journal    replace the journal with stdin (e.g. lab submit-journal < journal.md)
+Reach nodes with: ssh <node> '<command>'   (e.g. ssh web1 'ip -br addr')
+HELP
+    exit 1 ;;
+esac
