@@ -2,7 +2,7 @@
 
 **A small, realistic datacenter in containers that breaks on purpose, so you can practise fixing it.**
 
-[![CI](https://github.com/<you>/netchaos-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/<you>/netchaos-lab/actions/workflows/ci.yml)
+[![CI](https://github.com/marion-official/netchaos-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/marion-official/netchaos-lab/actions/workflows/ci.yml)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 
 A chaos script injects a fault somewhere between the internet and the database. You get a ticket
