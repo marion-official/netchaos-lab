@@ -29,9 +29,11 @@ say "lock the lab repo away from $AI_USER"
 chmod 700 "$LAB_DIR"
 if sudo -u "$AI_USER" test -r "$LAB_DIR/labctl" 2>/dev/null || sudo -u "$AI_USER" ls "$LAB_DIR/faults" >/dev/null 2>&1; then
   cat >&2 <<WARN
-!! $AI_USER can still read $LAB_DIR - this filesystem ignores Unix permissions for other users
-!! (some VM folder mounts do). The AI could read the answers. Fix: keep the lab on the VM's own
-!! disk instead of the Mac mount, e.g.  cp -a "$LAB_DIR" ~$OWNER/netchaos-lab  and run setup from there.
+!! $AI_USER can still read $LAB_DIR: this filesystem ignores Unix permissions for other users
+!! (Mac folder mounts in OrbStack/Lima do). The AI could read the answers, so setup STOPPED here:
+!! no workspaces, no 'lab' command, no keys were created.
+!! Fix: run the lab from the VM's own disk (scripts/mac-vm.sh does this for you), e.g.
+!!     cp -a "$LAB_DIR" ~$OWNER/netchaos-lab && cd ~$OWNER/netchaos-lab && sudo ./ai/setup-ai.sh
 WARN
   exit 1
 fi

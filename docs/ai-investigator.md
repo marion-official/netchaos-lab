@@ -50,7 +50,12 @@ There are two workspaces, and the only difference between them is the variable u
 Skipping permission prompts is acceptable here *only* because the user is isolated. The guard hook
 still applies in that mode.
 
-Use the same prompt every time, so the prompt isn't a variable:
+### The prompt
+
+Don't add context ("it's a test lab", "it's probably the network", "you're being scored"). The
+workspace's `CLAUDE.md` already tells Claude what a human gets from these docs: it's an on-call job
+in a container lab, the topology, the tools and the rules. Anything you add becomes a variable, and
+you'll word it slightly differently by run five. Use the same prompt every time:
 
 - **AI solo:** *"There is an open incident. Investigate it, resolve it, verify with `lab check`,
   and write the journal."* Then hands off. If you have to intervene, write that in the journal; it
@@ -58,10 +63,26 @@ Use the same prompt every time, so the prompt isn't a variable:
 - **human+ai:** *"I'm investigating an open incident and you're my copilot. Suggest what to check
   and why; run commands only when I agree."* You keep working in your own shell as usual.
 
+**When it stops to ask you something** ("should I restart haproxy?"), always give the same answer:
+*"You're the on-call engineer. Decide yourself and continue."* Note each one in the journal. Any
+other answer (a technical reply, a pointer) is a real intervention, and the jury should see it.
+
 End the Claude session with `/exit`, so the transcript gets saved. Then run the postmortem jury
 from your own Claude Code in the repo folder as usual. It knows about the AI artefacts.
 
-**Comparing fairly:**
+**On a Mac**, everything is written inside the VM. Copy it out with `./scripts/mac-vm.sh --pull`
+(from your Mac checkout) before reading it or running the jury there.
+
+### Dry run first
+
+Before the first real experiment, run one AI incident on a level 1 fault you've already solved, to
+check the plumbing. A broken hook would invalidate a real run. After `/exit`:
+
+- `journal/` has `<ts>.ai-tools.jsonl` and `<ts>-ai-transcript-1.jsonl`;
+- `./labctl commands` shows its node commands as `ai-ssh-cmd` / `ai-ssh`;
+- `cat ~/netchaos-lab/README.md` as `investigator` fails with "Permission denied".
+
+### Comparing fairly
 
 - Give each condition the same fault and seed.
 - Run the **human condition first**. Once you've seen a fault's solution, you can't un-see it,

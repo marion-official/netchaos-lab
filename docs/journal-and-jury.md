@@ -63,6 +63,9 @@ jury reviewing a postmortem. It judges *how* you troubleshot, not only whether `
    detection and prevention from there: if you didn't write it down, it can't credit you for it.
 4. Start Claude Code in the repo folder (`cd netchaos-lab && claude`) and ask *"run the postmortem jury on
    my last incident"*. To review an older one, name its journal.
+   **On a Mac**, the journals live in the VM: either run Claude Code inside the VM, in
+   `~/netchaos-lab`, or first copy them to the Mac with `./scripts/mac-vm.sh --pull` and run it in
+   your Mac checkout.
 5. Read `journal/<ts>.review.md`.
 
 **What it scores** (0-4 each, every score backed by a quote from your journal or command log):

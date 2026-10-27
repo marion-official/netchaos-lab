@@ -107,6 +107,18 @@ chain, remedy, detection, prevention. Your commands land next to it. When you fi
 in this repo can run the **postmortem jury** (`.claude/skills/postmortem-jury`) on it.
 See [docs/journal-and-jury.md](docs/journal-and-jury.md).
 
+**On a Mac, the journals are written inside the VM** (`~/netchaos-lab/journal`), not in your Mac
+checkout: `--sync` only copies Mac → VM, and never touches `journal/`. To get them out, run this on
+the Mac, from your checkout:
+
+```bash
+./scripts/mac-vm.sh --pull            # VM journal/ -> ./journal on the Mac (add --name=<vm> if yours isn't "netchaos")
+```
+
+It copies every journal, command log, recording, AI transcript and sealed solution. Files you've
+edited on the Mac since the last pull are kept, not overwritten. Then run the jury from the Mac
+checkout (`claude`, *"run the postmortem jury on my last incident"*), or run it inside the VM: both work.
+
 ## Human vs AI
 
 `ai/` sets up Claude Code as an investigator under its own Linux user. File permissions and a single
@@ -118,7 +130,28 @@ sudo rule keep it away from the answers, and hooks record everything. There are 
 - human with AI as copilot
 
 Run the same fault and seed under each condition and compare the jury's scores.
-See [docs/ai-investigator.md](docs/ai-investigator.md).
+
+**One AI run, start to finish** (on the lab host: the VM on a Mac):
+
+```bash
+# your shell, in ~/netchaos-lab
+sudo ./ai/setup-ai.sh                     # before EVERY run: fresh workspaces, wiped AI memory
+./labctl break --fault ID --seed N --investigator ai+method     # or: ai (no method skill)
+
+# a second terminal: become the investigator
+sudo -iu investigator
+cd ~/ws-method && claude --dangerously-skip-permissions          # ws-baseline for "ai"
+```
+
+Paste this prompt, word for word, then keep your hands off:
+
+> There is an open incident. Investigate it, resolve it, verify with `lab check`, and write the journal.
+
+If it stops to ask you something, always answer the same way, and note the intervention in the
+journal: *"You're the on-call engineer. Decide yourself and continue."* End with `/exit`: that's
+what saves the transcript. On a Mac, `./scripts/mac-vm.sh --pull` brings everything out.
+
+Details, the first-time login and a dry-run checklist: [docs/ai-investigator.md](docs/ai-investigator.md).
 
 ## Spoilers
 
