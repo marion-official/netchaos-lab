@@ -61,13 +61,29 @@ say "the 'lab' command (sudo rule limited to ai/labctl-ai)"
 echo "$AI_USER ALL=($OWNER) NOPASSWD: $LAB_DIR/ai/labctl-ai" > /etc/sudoers.d/netchaos-investigator
 chmod 440 /etc/sudoers.d/netchaos-investigator
 visudo -cf /etc/sudoers.d/netchaos-investigator >/dev/null
-printf '#!/bin/sh\nexec sudo -n -u %s %s "$@"\n' "$OWNER" "$LAB_DIR/ai/labctl-ai" > /usr/local/bin/lab
+# LAB_INCIDENT is set per Claude session by hooks/session-start.sh (sudo drops the environment,
+# so it's passed as an argument): the AI's journal commands then always hit the incident that was
+# open when the session started, never an older one.
+printf '#!/bin/sh\nexec sudo -n -u %s %s ${LAB_INCIDENT:+--incident "$LAB_INCIDENT"} "$@"\n' "$OWNER" "$LAB_DIR/ai/labctl-ai" > /usr/local/bin/lab
 chmod 755 /usr/local/bin/lab
 
 say "fresh Claude Code workspaces (no memory of earlier runs; the login is kept)"
 # Claude Code keeps per-project history and memory here. Wiping it prevents an AI run from
 # "remembering" an earlier incident. Transcripts are already saved in the lab's journal.
-rm -rf "${AI_HOME:?}/.claude/projects" "${AI_HOME:?}/.claude/todos" 2>/dev/null || true
+# Before wiping, keep every earlier session's raw transcript: the hooks normally save them, but a
+# session can end without them firing, and then this is the only copy left.
+arch="$LAB_DIR/journal/ai-sessions-archive/$(date +%Y%m%d-%H%M%S)"
+found=$(find "$AI_HOME/.claude/projects" -name '*.jsonl' -size +0 2>/dev/null | head -1 || true)
+if [ -n "$found" ]; then
+  install -d -o "$OWNER" "$LAB_DIR/journal" "$LAB_DIR/journal/ai-sessions-archive" "$arch"
+  { find "$AI_HOME/.claude/projects" -name '*.jsonl' -size +0 -print0 2>/dev/null || true; } |
+    while IFS= read -r -d '' f; do
+      sed -E 's/sk-ant-[A-Za-z0-9_-]{8,}/[REDACTED]/g' "$f" > "$arch/$(basename "$(dirname "$f")")--$(basename "$f")"
+    done
+  chown -R "$OWNER" "$arch"
+  echo "   archived earlier AI sessions to ${arch#"$LAB_DIR"/}"
+fi
+rm -rf "${AI_HOME:?}/.claude/projects" "${AI_HOME:?}/.claude/todos" "${AI_HOME:?}/.netchaos/sessions" 2>/dev/null || true
 for ws in ws-baseline ws-method; do
   rm -rf "${AI_HOME:?}/$ws.new" && cp -a "$LAB_DIR/ai/workspace" "$AI_HOME/$ws.new"
   if [ "$ws" = ws-method ]; then
