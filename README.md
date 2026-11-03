@@ -118,7 +118,7 @@ copy the journals out first:
    the AI session ended with `/exit`, so its transcript is saved.
 2. **Copy the journals to the Mac.** On the Mac, from your checkout:
    ```bash
-   ./scripts/mac-vm.sh --pull                 # add --name=<vm> if your VM isn't called "netchaos"
+   ./scripts/mac-vm.sh --pull                 # first time: add --name=<vm> if your VM isn't "netchaos" (remembered)
    ```
    Or, from inside an OrbStack VM, where the Mac folder is mounted read-write:
    ```bash

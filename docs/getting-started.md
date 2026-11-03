@@ -69,8 +69,9 @@ and mounts can ignore `chmod`. Your journals therefore live in the VM, under
 - **To get your journals out of the VM:** run `./scripts/mac-vm.sh --pull` on the Mac. It copies
   the VM's `journal/` into your Mac checkout's `journal/`, keeping any file you've edited on the Mac
   since the last pull.
-- **Already have a VM with another name** (e.g. one you made by hand)? Add `--name=<vm>` to any
-  of these, plus `--orbstack` or `--lima`.
+- **Already have a VM with another name** (e.g. one you made by hand)? Add `--name=<vm>` (and
+  `--orbstack` or `--lima` if you have both) the first time. The script remembers the VM in
+  `.state/mac-vm`, so later `--sync` and `--pull` calls don't need it.
 - **Apple Silicon** works natively: the node image is built locally for arm64.
 
 ## After a reboot
