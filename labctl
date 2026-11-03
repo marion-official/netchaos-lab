@@ -418,6 +418,17 @@ cmd_selftest() {
   return $rc
 }
 
+# The AI's 'lab' command (written by ai/setup-ai.sh) serves ONE checkout. An incident opened from
+# another checkout (e.g. the Mac folder mounted in the VM, next to the VM's own copy) is invisible
+# to the AI, and that checkout may even be readable by it. Refuse instead of running a broken experiment.
+ai_checkout_check() {
+  local wrapper=/usr/local/bin/lab target
+  [ -f "$wrapper" ] || die "the AI investigator isn't set up on this host: run sudo ./ai/setup-ai.sh first"
+  target=$(grep -o '/[^ ]*/ai/labctl-ai' "$wrapper" | head -1)
+  [ "$(readlink -f "$target")" = "$(readlink -f "$LAB_DIR/ai/labctl-ai")" ] || die "the AI's 'lab' command serves ${target%/ai/labctl-ai}, but this is $LAB_DIR.
+   Run labctl from that checkout (./labctl down here first if this lab is running), or re-run sudo ./ai/setup-ai.sh here."
+}
+
 cmd_break() {
   need_running
   local level="" id="" seed=""; INVESTIGATOR=human
@@ -427,6 +438,8 @@ cmd_break() {
                *) die "unknown option '$1' (break [--level N] [--fault ID] [--seed N] [--investigator WHO])";; esac; shift
   done
   [ -f "$STATE" ] && die "a fault is already active (./labctl ticket, or ./labctl reset)"
+  case $INVESTIGATOR in human) ;; ai|ai+method|human+ai) ai_checkout_check ;;
+    *) die "unknown investigator '$INVESTIGATOR' (human, ai, ai+method, human+ai)" ;; esac
   [ -n "$seed" ] && export LAB_SEED=$seed
   if [ -z "$id" ]; then
     local cand=() c

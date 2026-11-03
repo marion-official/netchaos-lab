@@ -8,5 +8,5 @@ jq -c '{
   tool: .tool_name,
   input: (.tool_input.command // .tool_input.file_path // .tool_input.skill // (.tool_input | tostring | .[0:300])),
   result: ((.tool_response // .error // "") | tostring | .[0:2000])
-}' 2>/dev/null | lab ai-log 2>/dev/null
+}' 2>/dev/null | sed -E 's/sk-ant-[A-Za-z0-9_-]{8,}/[REDACTED]/g' | lab ai-log 2>/dev/null
 exit 0

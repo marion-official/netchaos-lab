@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Setup of the AI investigator INSIDE the Linux VM:   sudo ./ai/setup-ai.sh
 # Run it once, and again before EVERY AI run: it recreates fresh workspaces (see below).
+#   sudo ./ai/setup-ai.sh --token     # also store a Claude Code token (from 'claude setup-token'),
+#                                     # instead of logging in with /login inside the VM
 #
 # Creates the Linux user 'investigator' that runs Claude Code. Isolation is done with OS
 # permissions, not with prompts or hooks (an agent can always try 'cat faults/*.sh'):
@@ -11,6 +13,10 @@
 #   - its own SSH key            -> reaches the nodes like you do; tagged LAB_ACTOR=ai, so its
 #                                   commands appear as ai-ssh / ai-ssh-cmd in the command log
 set -euo pipefail
+SET_TOKEN=""
+for a in "$@"; do
+  case $a in --token) SET_TOKEN=1 ;; *) echo "unknown option: $a (only --token)" >&2; exit 1 ;; esac
+done
 AI_USER=investigator
 LAB_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 OWNER=${SUDO_USER:-}
@@ -83,6 +89,30 @@ else
 fi
 grep -q '.local/bin' "$AI_HOME/.bashrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$AI_HOME/.bashrc"
 
+# Optional: authenticate with a long-lived token instead of /login (handy when the login URL
+# can't be copied out of the VM terminal). It lives in the investigator's home, NOT in the repo:
+# the repo is unreadable for the investigator by design, and it gets synced and committed.
+TOKEN_FILE=$AI_HOME/.config/netchaos/claude.env
+if [ -n "$SET_TOKEN" ]; then
+  say "Claude Code token for $AI_USER"
+  echo "   Create one on a machine with a browser (e.g. your Mac): claude setup-token"
+  if [ -t 0 ]; then read -rsp "   Paste the token (input hidden): " tok; echo
+  else read -r tok || true; fi          # also accepts: sudo ./ai/setup-ai.sh --token < file
+  tok=$(printf '%s' "$tok" | tr -d '[:space:]')
+  [ -n "$tok" ] || { echo "!! empty token, nothing stored" >&2; exit 1; }
+  install -d -m 700 -o "$AI_USER" -g "$AI_USER" "$AI_HOME/.config" "$AI_HOME/.config/netchaos"
+  ( umask 077; printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q\n' "$tok" > "$TOKEN_FILE" )
+  chown "$AI_USER:$AI_USER" "$TOKEN_FILE"; chmod 600 "$TOKEN_FILE"
+  unset tok
+  echo "   stored in $TOKEN_FILE (readable by $AI_USER only); /login isn't needed"
+fi
+for rc in .bashrc .profile; do      # .profile too: .bashrc returns early in non-interactive shells
+  [ -f "$AI_HOME/$rc" ] || continue
+  grep -q 'netchaos/claude.env' "$AI_HOME/$rc" \
+    || echo '[ -f ~/.config/netchaos/claude.env ] && . ~/.config/netchaos/claude.env' >> "$AI_HOME/$rc"
+done
+[ -f "$TOKEN_FILE" ] && echo "   token file present: Claude Code will use it" || true
+
 say "install the AI key on the running lab nodes (if the lab is up)"
 sudo -u "$OWNER" "$LAB_DIR/labctl" ssh-setup 2>/dev/null || echo "   lab not running - the key is installed at the next ./labctl up / break"
 
@@ -91,6 +121,7 @@ cat <<DONE
 Done. Next steps:
   sudo -iu $AI_USER                 # become the investigator
   cd ws-method && claude            # first time only: log in (/login), then exit
+                                    #   (or skip /login: sudo ./ai/setup-ai.sh --token)
   lab ticket ; ssh web1 hostname    # sanity check: ticket readable, nodes reachable
   cat $LAB_DIR/README.md            # must FAIL with 'Permission denied'
 See docs/ai-investigator.md for running the experiment conditions.

@@ -107,17 +107,35 @@ chain, remedy, detection, prevention. Your commands land next to it. When you fi
 in this repo can run the **postmortem jury** (`.claude/skills/postmortem-jury`) on it.
 See [docs/journal-and-jury.md](docs/journal-and-jury.md).
 
-**On a Mac, the journals are written inside the VM** (`~/netchaos-lab/journal`), not in your Mac
-checkout: `--sync` only copies Mac → VM, and never touches `journal/`. To get them out, run this on
-the Mac, from your checkout:
+### Judging an incident with Claude Code outside the VM (Mac)
 
-```bash
-./scripts/mac-vm.sh --pull            # VM journal/ -> ./journal on the Mac (add --name=<vm> if yours isn't "netchaos")
-```
+On a Mac, the lab and its journals live **inside the VM** (`~/netchaos-lab/journal`), while you
+probably run Claude Code on the Mac. `--sync` only copies Mac → VM and never touches `journal/`, so
+copy the journals out first:
 
-It copies every journal, command log, recording, AI transcript and sealed solution. Files you've
-edited on the Mac since the last pull are kept, not overwritten. Then run the jury from the Mac
-checkout (`claude`, *"run the postmortem jury on my last incident"*), or run it inside the VM: both work.
+1. **Close the incident** in the VM: `./labctl check` passes, or `./labctl reveal`. This seals
+   the ground truth (`<ts>.solution.md`) and writes the final command log. For an AI run, make sure
+   the AI session ended with `/exit`, so its transcript is saved.
+2. **Copy the journals to the Mac.** On the Mac, from your checkout:
+   ```bash
+   ./scripts/mac-vm.sh --pull                 # add --name=<vm> if your VM isn't called "netchaos"
+   ```
+   Or, from inside an OrbStack VM, where the Mac folder is mounted read-write:
+   ```bash
+   cp -a ~/netchaos-lab/journal/. /Users/<you>/path/to/netchaos-lab/journal/
+   ```
+   Either way you get every journal, command log, recording, AI transcript and sealed solution.
+   `--pull` keeps files you've edited on the Mac since the last pull; `cp` overwrites them.
+3. **Run the jury** in the Mac checkout:
+   ```bash
+   cd netchaos-lab && claude
+   > run the postmortem jury on my last incident      # or name a journal: journal/20261103-154745.md
+   ```
+   The review is written to `journal/<ts>.review.md`, on the Mac. `--sync` skips `journal/`, so
+   copy the review into the VM by hand if you want it there too.
+
+Running the jury inside the VM works too, as your own user in `~/netchaos-lab`. Never as
+`investigator`: it can't read the journals, by design.
 
 ## Human vs AI
 
@@ -142,6 +160,9 @@ sudo ./ai/setup-ai.sh                     # before EVERY run: fresh workspaces, 
 sudo -iu investigator
 cd ~/ws-method && claude --dangerously-skip-permissions          # ws-baseline for "ai"
 ```
+
+The first time, Claude asks you to log in. If you can't copy the login URL out of the VM terminal,
+create a token on your Mac with `claude setup-token` and store it with `sudo ./ai/setup-ai.sh --token`.
 
 Paste this prompt, word for word, then keep your hands off:
 

@@ -25,6 +25,24 @@ sudo -iu investigator             # become the investigator
 cd ws-method && claude            # first time only: /login, then /exit
 ```
 
+**Can't copy the login URL out of the VM terminal?** Use a token instead of `/login`:
+
+```bash
+claude setup-token                 # on a machine with a browser (your Mac): prints a long-lived token
+sudo ./ai/setup-ai.sh --token      # on the lab host: paste it (hidden input), or pipe it in from a file
+```
+
+The token is stored in `~investigator/.config/netchaos/claude.env` (mode 600, owned by
+`investigator`) and loaded by its shell as `CLAUDE_CODE_OAUTH_TOKEN`. It is deliberately **not** a
+`.env` in the repo: the repo is unreadable for `investigator` by design, and it gets synced and
+committed. Re-running `setup-ai.sh` without `--token` keeps it.
+
+The token is your account's credential, and the AI runs with it in its environment. Two safeguards
+keep it out of the evidence you might publish: the guard hook blocks local commands that dump the
+environment or read the token file, and the hooks redact anything that looks like an Anthropic
+token (`sk-ant-...`) from the tool log and the saved transcript. Still skim transcripts before
+publishing them, and revoke the token (claude.ai settings) when the experiment is over.
+
 `setup-ai.sh` refuses to continue if `investigator` can still read the repo. Some VM folder mounts
 ignore Unix permissions. If that happens, keep the lab on the host's own disk (on a Mac: the copy made by `scripts/mac-vm.sh`, inside the VM).
 
