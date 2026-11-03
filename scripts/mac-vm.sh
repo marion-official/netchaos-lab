@@ -8,23 +8,33 @@
 #   ./scripts/mac-vm.sh --pull        # copy the VM's journal/ back to this checkout on the Mac
 #   ./scripts/mac-vm.sh --name=dclab  # use a VM with another name (default: netchaos)
 #
+# The VM name and engine are remembered in .state/mac-vm after the first successful run, so
+# later --sync/--pull calls don't need --name or --orbstack/--lima again.
+#
 # Why a copy and not the Mac folder itself: the lab needs real Linux file permissions (the AI
 # investigator must NOT be able to read the answers) and a writable disk. VM folder mounts give
 # neither reliably: Lima mounts your home read-only, and mounts may ignore chmod. Your journals
 # live inside the VM, under ~/netchaos-lab/journal.
 set -euo pipefail
-VM=netchaos
+VM=""
 ENGINE=""; SYNC=""; PULL=""
 for a in "$@"; do
   case $a in
     --lima) ENGINE=lima ;; --orbstack) ENGINE=orbstack ;; --sync) SYNC=1 ;; --pull) PULL=1 ;;
     --name=*) VM=${a#--name=} ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown option: $a (see --help)" >&2; exit 1 ;;
   esac
 done
 [ "$(uname -s)" = Darwin ] || { echo "This is for macOS. On Linux run scripts/setup-host.sh." >&2; exit 1; }
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+REMEMBER=$REPO/.state/mac-vm          # last VM name/engine used from this checkout
+if [ -f "$REMEMBER" ]; then
+  saved_vm=$(sed -n 's/^VM=//p' "$REMEMBER"); saved_engine=$(sed -n 's/^ENGINE=//p' "$REMEMBER")
+  [ -z "$VM" ] && VM=$saved_vm
+  [ -z "$ENGINE" ] && ENGINE=$saved_engine
+fi
+VM=${VM:-netchaos}
 
 if [ -z "$ENGINE" ]; then
   if command -v orb >/dev/null; then ENGINE=orbstack
@@ -58,10 +68,20 @@ esac
 if exists; then
   echo ">> VM '$VM' exists ($ENGINE)"
 else
-  [ -n "$SYNC$PULL" ] && { echo "VM '$VM' doesn't exist yet - run without --sync/--pull first." >&2; exit 1; }
+  if [ -n "$SYNC$PULL" ]; then
+    case $ENGINE in
+      orbstack) vms=$(orb list 2>/dev/null | awk '{print $1}' | grep -v '^NAME$' | tr '\n' ' ') ;;
+      lima)     vms=$(limactl list -q 2>/dev/null | tr '\n' ' ') ;;
+    esac
+    echo "No $ENGINE VM called '$VM'. Your $ENGINE VMs: ${vms:-none}" >&2
+    echo "If the lab lives in one of them, say which once (it's remembered): $0 --name=<vm> ${SYNC:+--sync}${PULL:+--pull}" >&2
+    echo "To create the '$VM' VM instead, run without --sync/--pull." >&2
+    exit 1
+  fi
   echo ">> creating VM '$VM' with $ENGINE (Ubuntu)"
   create
 fi
+mkdir -p "$REPO/.state" && printf 'VM=%s\nENGINE=%s\n' "$VM" "$ENGINE" > "$REMEMBER"
 # OrbStack/Lima stop VMs when idle or on reboot: make sure it runs
 case $ENGINE in orbstack) orb start "$VM" >/dev/null 2>&1 || true ;; lima) limactl start "$VM" >/dev/null 2>&1 || true ;; esac
 
