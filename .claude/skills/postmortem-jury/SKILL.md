@@ -24,7 +24,7 @@ In `journal/`, one incident = one timestamp `<ts>` (the journal file name):
 | `<ts>-<node>.log` | Output recordings of `labctl shell` sessions. Prompts look like `[HH:MM:SS node /path]#` |
 | `<ts>-ssh-<node>-*.log` | Output recordings of interactive `ssh` sessions |
 | `<ts>.solution.md` | Sealed ground truth: fault id, randomised parameters, reference solution, outcome log (hints, reveal, resolve times) |
-| `<ts>-ai-transcript-<n>.jsonl` | AI runs only: the full Claude Code session (prompts, the AI's reasoning, tool calls and outputs). One file per session |
+| `<ts>-ai-transcript-<session>.jsonl` (older runs: `-<n>.jsonl`) | AI runs only: the full Claude Code session (prompts, the AI's reasoning, tool calls and outputs). One file per session, bound to the incident open when the session started. If none is there, look in `journal/ai-sessions-archive/*/` for raw sessions archived by setup-ai.sh, matching by time; say in the review which file you used |
 | `<ts>.ai-tools.jsonl` | AI runs only: one line per AI tool call (command or file, result excerpt), including blocked attempts and failures |
 
 - If no journal is named, take the most recent `<ts>.md` that has a `<ts>.solution.md` next to it.

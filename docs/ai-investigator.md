@@ -13,9 +13,19 @@ to the nodes that you have, and none to the answers.
 
 The hooks also record the AI's side of the incident:
 
+- a `SessionStart` hook **binds the session to the incident open at that moment**. Everything the
+  session logs or writes later goes to that incident, even after `lab check` has closed it, and
+  never to an older one. A session started with no incident open is bound to "none": its logs go
+  to `journal/ai-unattached-*`, and `lab journal` / `lab submit-journal` refuse to run;
 - a `PostToolUse` hook logs every tool call to `journal/<ts>.ai-tools.jsonl`;
-- a `SessionEnd` hook saves the whole session (prompts, reasoning, commands, outputs) as
-  `journal/<ts>-ai-transcript-<n>.jsonl`, so the jury can judge the AI's reasoning.
+- `Stop` (after every AI turn) and `SessionEnd` hooks save the whole session (prompts, reasoning,
+  commands, outputs) as `journal/<ts>-ai-transcript-<session>.jsonl`, one file per session,
+  overwritten each turn. A session that ends without `/exit` (Ctrl+C, a closed terminal) still
+  leaves its transcript, at most one turn short. Sessions with no tool calls at all (e.g. only
+  `/login`) aren't saved;
+- `setup-ai.sh` archives every raw session file it finds into `journal/ai-sessions-archive/<date>/`
+  (token-redacted) before wiping Claude Code's history, so nothing is lost even if the hooks didn't
+  fire.
 
 ## Setup (on the lab host)
 
@@ -96,7 +106,8 @@ from your own Claude Code in the repo folder as usual. It knows about the AI art
 Before the first real experiment, run one AI incident on a level 1 fault you've already solved, to
 check the plumbing. A broken hook would invalidate a real run. After `/exit`:
 
-- `journal/` has `<ts>.ai-tools.jsonl` and `<ts>-ai-transcript-1.jsonl`;
+- `journal/` has `<ts>.ai-tools.jsonl` and a `<ts>-ai-transcript-<session>.jsonl` that contains
+  the working session (not only a `/login`);
 - `./labctl commands` shows its node commands as `ai-ssh-cmd` / `ai-ssh`;
 - `cat ~/netchaos-lab/README.md` as `investigator` fails with "Permission denied".
 

@@ -6,16 +6,43 @@
 set -uo pipefail
 LAB_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 L="$LAB_DIR/labctl"
-journal() { "$L" journal-path 2>/dev/null || { echo "no incident yet" >&2; exit 1; }; }
 MAX=$((512 * 1024))
+
+# --incident ID: the incident this AI session was bound to when it started (hooks/session-start.sh,
+# passed on by /usr/local/bin/lab from $LAB_INCIDENT). Without it: the open incident, else the last.
+INC=""
+while [ "${1:-}" = --incident ]; do INC=${2:-}; shift 2 || shift; done
+case $INC in ''|none|[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *) echo "bad incident id '$INC'" >&2; exit 1 ;; esac
+
+journal() {
+  if [ "$INC" = none ]; then
+    echo "no incident was open when this AI session started. Start one (./labctl break), then start a new session." >&2
+    exit 1
+  elif [ -n "$INC" ]; then
+    [ -f "$LAB_DIR/journal/$INC.md" ] || { echo "incident $INC not found" >&2; exit 1; }
+    echo "$LAB_DIR/journal/$INC.md"
+  else
+    "$L" journal-path 2>/dev/null || { echo "no incident yet" >&2; exit 1; }
+  fi
+}
+# where a hook's logs go: the bound incident, or a clearly separate file for unbound sessions
+logbase() {
+  if [ "$INC" = none ]; then mkdir -p "$LAB_DIR/journal"; echo "$LAB_DIR/journal/ai-unattached-$(date +%Y%m%d)"
+  else local j; j=$(journal) || return 1; echo "${j%.md}"; fi
+}
 
 case ${1:-help} in
   ticket|status|check|hint|nodes)
     exec "$L" "$1" ;;
+  incident)                      # id of the incident open right now (for hooks/session-start.sh)
+    [ -f "$LAB_DIR/.state/current" ] || exit 1
+    j=$("$L" journal-path 2>/dev/null) || exit 1
+    basename "$j" .md ;;
   journal)                       # print the incident journal (template to fill in)
-    cat "$(journal)" ;;
+    j=$(journal) || exit 1; cat "$j" ;;
   submit-journal)                # replace the journal with stdin, keeping labctl's result footer
-    j=$(journal); new=$(head -c $MAX)
+    j=$(journal) || exit 1; new=$(head -c $MAX)
     [ -n "$new" ] || { echo "empty journal refused" >&2; exit 1; }
     footer=$(grep -E '^\*\*Result:\*\*' "$j" || true)
     { printf '%s\n' "$new"
@@ -24,14 +51,16 @@ case ${1:-help} in
       done <<<"$footer"; } > "$j.tmp" || { rm -f "$j.tmp"; echo "could not write the journal" >&2; exit 1; }
     mv "$j.tmp" "$j" || { echo "could not save the journal" >&2; exit 1; }
     echo "journal saved: $(basename "$j")" ;;
-  save-transcript)               # AI session transcript (from the SessionEnd hook)
-    j=$(journal); n=1
-    while [ -e "${j%.md}-ai-transcript-$n.jsonl" ]; do n=$((n + 1)); done
-    head -c $((50 * 1024 * 1024)) > "${j%.md}-ai-transcript-$n.jsonl"
-    echo "transcript saved: $(basename "${j%.md}")-ai-transcript-$n.jsonl" ;;
+  save-transcript)               # AI session transcript (Stop and SessionEnd hooks): one file per session
+    b=$(logbase) || exit 1; sid=${2:-}
+    case $sid in *[!A-Za-z0-9-]*) echo "bad session id" >&2; exit 1 ;; esac
+    if [ -n "$sid" ]; then out="$b-ai-transcript-${sid:0:8}.jsonl"
+    else n=1; while [ -e "$b-ai-transcript-$n.jsonl" ]; do n=$((n + 1)); done; out="$b-ai-transcript-$n.jsonl"; fi
+    head -c $((50 * 1024 * 1024)) > "$out.tmp" && mv "$out.tmp" "$out"   # overwritten after every turn
+    echo "transcript saved: $(basename "$out")" ;;
   ai-log)                        # one JSON line per tool call (from the PostToolUse hooks)
-    j=$(journal) || exit 0
-    head -c 65536 | tr -d '\n' >> "${j%.md}.ai-tools.jsonl"; echo >> "${j%.md}.ai-tools.jsonl" ;;
+    b=$(logbase) || exit 0
+    head -c 65536 | tr -d '\n' >> "$b.ai-tools.jsonl"; echo >> "$b.ai-tools.jsonl" ;;
   *)
     cat >&2 <<HELP
 lab - the AI investigator's access to the lab
