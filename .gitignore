@@ -10,3 +10,7 @@ ai/investigator.pub
 .vscode/
 .DS_Store
 *.swp
+
+# secrets (never commit tokens; the AI token lives in the investigator home, see ai/setup-ai.sh --token)
+.env
+*.env
