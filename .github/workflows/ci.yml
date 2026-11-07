@@ -67,6 +67,15 @@ jobs:
           ./labctl recover
           if ./labctl check; then echo "check passed although the fault should be back"; exit 1; fi
           ls journal/*.commands.part1.log
+      - name: Diagnostics (on failure)
+        if: failure()
+        run: |
+          ./labctl doctor || true
+          ./labctl nodes || true
+          ./labctl selftest || true
+          for c in $(docker ps --format '{{.Names}}' --filter name=clab-dc-); do
+            echo "::group::$c"; docker exec "$c" sh -c 'tail -n 30 /var/log/lab-boot.log; ip -6 -br addr 2>/dev/null; ip -6 route 2>/dev/null | head -20' || true; echo "::endgroup::"
+          done
       - name: Tear down
         if: always()
         run: ./labctl down || true
@@ -87,6 +96,15 @@ jobs:
         run: |
           ids="$(ls faults/*-v6-*.sh | xargs -n1 basename | sed 's/\.sh$//') l1-port-down l2-wrong-gateway l1-fw-dnat"
           ./labctl selftest-faults $ids
+      - name: Diagnostics (on failure)
+        if: failure()
+        run: |
+          ./labctl doctor || true
+          ./labctl nodes || true
+          ./labctl selftest || true
+          for c in $(docker ps --format '{{.Names}}' --filter name=clab-dc-); do
+            echo "::group::$c"; docker exec "$c" sh -c 'tail -n 30 /var/log/lab-boot.log; ip -6 -br addr 2>/dev/null; ip -6 route 2>/dev/null | head -20' || true; echo "::endgroup::"
+          done
       - name: Tear down
         if: always()
         run: ./labctl down || true

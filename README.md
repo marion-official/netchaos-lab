@@ -90,6 +90,7 @@ symptom, as in a real datacenter. Details: [docs/architecture.md](docs/architect
 
 ```bash
 ./labctl break --level 1|2|3       # inject a random fault, show the ticket
+./labctl faults                    # spoiler-free list: which faults you've solved (add --unsolved to break)
 ssh web1                           # reach any node (or ./labctl shell web1 to record the output)
 ./labctl status                    # what customers see
 ./labctl hint                      # three hints per fault, vague to specific

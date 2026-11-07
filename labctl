@@ -429,26 +429,79 @@ ai_checkout_check() {
    Run labctl from that checkout (./labctl down here first if this lab is running), or re-run sudo ./ai/setup-ai.sh here."
 }
 
+# ---------------------------------------------------------------- spoiler-free fault list
+# Each fault gets a short code (a hash of its id), so you can list, track and replay faults
+# without seeing their names. Progress comes from the sealed solutions in journal/.
+fault_code() { printf '%s' "$1" | sha1sum | cut -c1-6; }
+code_to_id() {   # code_to_id <code-or-id>: accepts a fault id or its code
+  local c
+  [ -f "$LAB_DIR/faults/$1.sh" ] && { echo "$1"; return 0; }
+  for c in $(fault_ids); do [ "$(fault_code "$c")" = "$1" ] && { echo "$c"; return 0; }; done
+  return 1
+}
+# fault_runs <id>: one line per finished incident of that fault: "<investigator> <resolved|revealed>"
+fault_runs() {
+  local sol j who
+  for sol in $(grep -l "^- fault_id: $1\$" "$JOURNAL_DIR"/*.solution.md 2>/dev/null); do
+    j="${sol%.solution.md}.md"
+    who=$(sed -nE 's/.*\*\*Investigator:\*\* *([a-z+]+).*/\1/p' "$j" 2>/dev/null | head -1)
+    if grep -q ': resolved in' "$sol"; then echo "${who:-human} resolved"; else echo "${who:-human} revealed"; fi
+  done
+}
+fault_solved_by_you() {   # (no pipe into grep -q: with pipefail, the early exit fails the pipeline)
+  local runs; runs=$(fault_runs "$1"); grep -Eq '^(human|human\+ai) resolved' <<<"$runs"; }
+
+cmd_faults() {
+  local level="" id code runs you ai n_all=0 n_done=0
+  while [ $# -gt 0 ]; do case $1 in --level) level=$2; shift;; *) die "unknown option '$1' (faults [--level N])";; esac; shift; done
+  printf '%sLEVEL  CODE    YOU                    AI RUNS%s\n' "$c_bld" "$c_off"
+  # sorted by level, then code: the order must not follow the (spoiler) fault names
+  for id in $(for id in $(fault_ids "$level"); do echo "${id:1:1} $(fault_code "$id") $id"; done | sort | awk '{print $3}'); do
+    load_fault "$id"; code=$(fault_code "$id"); runs=$(fault_runs "$id")
+    local col="" txt sym
+    if grep -Eq '^(human|human\+ai) resolved' <<<"$runs"; then sym="✔"; txt="solved"; col=$c_grn; n_done=$((n_done + 1))
+    elif grep -Eq '^(human|human\+ai) revealed' <<<"$runs"; then sym="~"; txt="revealed"; col=$c_yel
+    else sym="·"; txt="not yet"; fi
+    ai=$(grep -Ec '^ai' <<<"$runs")
+    printf -v txt '%-20s' "$txt"                      # pad (ASCII only) before colouring
+    local note=""; fault_supported >/dev/null 2>&1 || note="  ${c_dim}(not available here: needs IPv6 mode or a kernel feature)${c_off}"
+    printf '  %s    %s  %s%s%s %s%s\n' "$FAULT_LEVEL" "$code" "$col" "$sym $txt" "$c_off" "$ai" "$note"
+    n_all=$((n_all + 1))
+  done
+  say; say "solved by you: $n_done of $n_all${level:+ at level $level}"
+  say "${c_dim}play one you haven't solved:  ./labctl break --level N --unsolved   ·   a specific one:  ./labctl break --fault CODE${c_off}"
+  say "${c_dim}counts every finished incident in journal/ (\"you\" = human and human+ai runs)${c_off}"
+}
+
 cmd_break() {
   need_running
-  local level="" id="" seed=""; INVESTIGATOR=human
+  local level="" id="" seed="" unsolved=""; INVESTIGATOR=human
   while [ $# -gt 0 ]; do
     case $1 in --level) level=$2; shift;; --fault) id=$2; shift;; --seed) seed=$2; shift;;
-               --investigator) INVESTIGATOR=$2; shift;;
-               *) die "unknown option '$1' (break [--level N] [--fault ID] [--seed N] [--investigator WHO])";; esac; shift
+               --investigator) INVESTIGATOR=$2; shift;; --unsolved) unsolved=1;;
+               *) die "unknown option '$1' (break [--level N] [--unsolved] [--fault CODE] [--seed N] [--investigator WHO])";; esac; shift
   done
   [ -f "$STATE" ] && die "a fault is already active (./labctl ticket, or ./labctl reset)"
   case $INVESTIGATOR in human) ;; ai|ai+method|human+ai) ai_checkout_check ;;
     *) die "unknown investigator '$INVESTIGATOR' (human, ai, ai+method, human+ai)" ;; esac
   [ -n "$seed" ] && export LAB_SEED=$seed
-  if [ -z "$id" ]; then
+  if [ -n "$id" ]; then
+    local given=$id
+    id=$(code_to_id "$given") || die "no fault '$given' (./labctl faults lists the codes)"
+  else
     local cand=() c
-    for c in $(fault_ids "$level"); do load_fault "$c"; fault_supported >/dev/null 2>&1 && cand+=("$c"); done
-    [ ${#cand[@]} -gt 0 ] || die "no usable faults for level '$level'"
+    for c in $(fault_ids "$level"); do
+      load_fault "$c"; fault_supported >/dev/null 2>&1 || continue
+      [ -n "$unsolved" ] && fault_solved_by_you "$c" && continue
+      cand+=("$c")
+    done
+    [ ${#cand[@]} -gt 0 ] || {
+      [ -n "$unsolved" ] && die "you've solved every available fault${level:+ at level $level} - time for the next level!"
+      die "no usable faults for level '$level'"; }
     id=$(pick "${cand[@]}")
   fi
   load_fault "$id"
-  fault_supported >/dev/null 2>&1 || die "fault '$id' can't run here (needs ./labctl up --ipv6, or a kernel feature this VM lacks)"
+  fault_supported >/dev/null 2>&1 || die "fault $(fault_code "$id") can't run here (needs ./labctl up --ipv6, or a kernel feature this VM lacks)"
   FAULT_ID=$id
   audit_setup                     # make sure every node logs commands (idempotent)
   ssh_setup >/dev/null 2>&1        # (re)install keys, incl. the AI investigator's if set up
@@ -689,8 +742,9 @@ ${c_bld}labctl${c_off} $VERSION - netchaos-lab, a datacenter to break and fix
   shell <node>               open a shell on a node (output recorded while a fault is active)
   commands                   every command typed during the current incident, on any node
 
-  break [--level 1|2|3] [--fault ID] [--seed N] [--investigator human|ai|ai+method|human+ai]
-                             inject a random fault
+  faults [--level N]         spoiler-free list: fault codes and which ones you've solved
+  break [--level 1|2|3] [--unsolved] [--fault CODE] [--seed N] [--investigator human|ai|ai+method|human+ai]
+                             inject a random fault (--unsolved: only ones you haven't solved yet)
   ticket                     show the current ticket
   hint                       reveal the next hint (they get more specific)
   check                      am I done?
@@ -705,7 +759,7 @@ EOF
 cmd=${1:-help}; shift || true
 case $cmd in --version|-V|version) echo "netchaos-lab $VERSION"; exit 0 ;; esac
 case $cmd in
-  build|up|down|reset|status|nodes|shell|break|ticket|hint|check|reveal|solution|selftest|commands|recover|doctor)
+  build|up|down|reset|status|nodes|shell|break|ticket|hint|check|reveal|solution|selftest|commands|recover|doctor|faults)
     "cmd_$cmd" "$@" ;;
   selftest-faults) cmd_selftest_faults "$@" ;;
   ssh-setup) need_running; ssh_setup && ok "ssh keys installed on all nodes" ;;
