@@ -751,15 +751,68 @@ ${c_bld}labctl${c_off} $VERSION - netchaos-lab, a datacenter to break and fix
   reveal                     give up and show the solution
   solution                   show the solution of the last resolved fault
 
+  sync [--from DIR]          copy the code from your editing checkout (e.g. the Mac folder) into this one;
+                             done automatically at up/reset/break when no incident is open
   selftest                   internal health (spoilers)
   selftest-faults [IDs]      maintainers: inject/fix every fault (spoilers)
 EOF
 }
 
+# ---------------------------------------------------------------- sync from the editing checkout
+# On a Mac the lab runs from a copy on the VM's disk (~/netchaos-lab), while you edit and use git in
+# the Mac folder. .state/source remembers that folder (written by scripts/mac-vm.sh or the first
+# 'labctl sync --from DIR'); labctl then keeps this copy up to date (see the dispatcher below).
+SRC_FILE="$STATE_DIR/source"; SYNCED="$STATE_DIR/synced-at"
+sync_source() { [ -f "$SRC_FILE" ] && cat "$SRC_FILE"; }
+tree_hash() { (cd "$LAB_DIR" && find "$@" -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null | sha1sum); }
+sync_stale() {    # true when the source checkout has files changed since the last sync
+  local src; src=$(sync_source) || return 1; [ -d "$src" ] || return 1
+  [ -f "$SYNCED" ] || return 0
+  [ -n "$(find "$src" \( -path "$src/journal" -o -path "$src/.state" -o -path "$src/.git" -o -name 'clab-*' \) -prune \
+          -o -type f -newer "$SYNCED" -print -quit 2>/dev/null)" ]
+}
+cmd_sync() {
+  local src=""
+  while [ $# -gt 0 ]; do case $1 in --from) src=$2; shift;; *) die "unknown option '$1' (sync [--from DIR])";; esac; shift; done
+  [ -n "$src" ] || src=$(sync_source) \
+    || die "no source checkout known yet. Once: ./labctl sync --from /Users/<you>/path/to/netchaos-lab"
+  src=$(cd "$src" 2>/dev/null && pwd) || die "can't open $src"
+  [ -x "$src/labctl" ] && [ -d "$src/faults" ] || die "$src doesn't look like a netchaos-lab checkout"
+  [ "$(readlink -f "$src")" != "$(readlink -f "$LAB_DIR")" ] || die "$src is this checkout"
+  [ -f "$STATE" ] && die "an incident is open: finish it (check or reveal) before syncing. Changing faults/ or labctl mid-incident can break it"
+  local ai_before; ai_before=$(tree_hash ai)
+  # same exclusions as scripts/mac-vm.sh --sync: journals and lab state here are never touched
+  tar -C "$src" --exclude=./.state --exclude=./journal --exclude='./clab-*' --exclude=./.git -cf - . \
+    | tar -C "$LAB_DIR" -xf - || die "copy from $src failed"
+  mkdir -p "$STATE_DIR"; echo "$src" > "$SRC_FILE"; touch "$SYNCED"
+  ok "synced code from $src (journals and lab state here untouched)"
+  if [ "$ai_before" != "$(tree_hash ai)" ]; then
+    say "${c_yel}!${c_off} ai/ changed: run ${c_bld}sudo ./ai/setup-ai.sh${c_off} before the next AI session (it updates the investigator's hooks)"
+  fi
+}
+
 cmd=${1:-help}; shift || true
 case $cmd in --version|-V|version) echo "netchaos-lab $VERSION"; exit 0 ;; esac
+
+# Keep this copy in sync with the editing checkout: before commands that start something (up, reset,
+# break), sync automatically when the source has changed and no incident is open, then re-run with
+# the new code. Otherwise just warn. Set NETCHAOS_AUTOSYNC=0 to only warn. Skipped for the AI's
+# 'lab' wrapper (it sets NETCHAOS_NO_SYNC_CHECK) so nothing leaks into the AI's output.
+if [ -z "${NETCHAOS_NO_SYNC_CHECK:-}" ] && [ "$cmd" != sync ] && sync_stale; then
+  case $cmd in
+    up|reset|break)
+      if [ ! -f "$STATE" ] && [ "${NETCHAOS_AUTOSYNC:-1}" != 0 ]; then
+        say "the source checkout ($(sync_source)) has changed: syncing first"
+        cmd_sync && exec env NETCHAOS_NO_SYNC_CHECK=1 "$LAB_DIR/labctl" "$cmd" "$@"
+        exit 1
+      fi ;;
+  esac
+  printf '%s!%s %s has changes not synced here yet: %s%s\n' "$c_yel" "$c_off" "$(sync_source)" \
+    "$([ -f "$STATE" ] && echo "finish this incident, then ./labctl sync" || echo "./labctl sync")" "" >&2
+fi
+
 case $cmd in
-  build|up|down|reset|status|nodes|shell|break|ticket|hint|check|reveal|solution|selftest|commands|recover|doctor|faults)
+  build|up|down|reset|status|nodes|shell|break|ticket|hint|check|reveal|solution|selftest|commands|recover|doctor|faults|sync)
     "cmd_$cmd" "$@" ;;
   selftest-faults) cmd_selftest_faults "$@" ;;
   ssh-setup) need_running; ssh_setup && ok "ssh keys installed on all nodes" ;;

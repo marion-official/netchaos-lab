@@ -4,6 +4,7 @@
 # commands, so the AI gets what a human gets from the ticket and nothing that reveals answers.
 # Inside the VM the AI calls it as:  lab <command>
 set -uo pipefail
+export NETCHAOS_NO_SYNC_CHECK=1   # labctl: no sync checks/warnings in the AI's output
 LAB_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 L="$LAB_DIR/labctl"
 MAX=$((512 * 1024))

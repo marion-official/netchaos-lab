@@ -64,8 +64,17 @@ writable disk. VM folder mounts don't reliably give you either: Lima mounts your
 and mounts can ignore `chmod`. Your journals therefore live in the VM, under
 `~/netchaos-lab/journal`.
 
-- **To pick up changes made on the Mac:** run `./scripts/mac-vm.sh --sync`. It copies the files
-  again; journals and lab state in the VM are kept.
+- **Edit on the Mac, run in the VM.** The Mac folder is where you edit and use git;
+  `~/netchaos-lab` in the VM is what runs. `labctl` in the VM keeps itself in sync: at `up`,
+  `reset` and `break`, if anything changed in the Mac folder and no incident is open, it copies the
+  code over and re-runs with it. Other commands just warn. Never mid-incident: changing `faults/` or
+  `labctl` under an open incident can break it. `./labctl sync` does it by hand, and
+  `NETCHAOS_AUTOSYNC=0` turns the automatic part off. Journals and lab state in the VM are never
+  touched, and edits made directly in the VM copy are overwritten, so don't edit there.
+- **If `ai/` changed,** sync tells you to run `sudo ./ai/setup-ai.sh`: that's what updates the
+  AI investigator's hooks.
+- From the Mac, `./scripts/mac-vm.sh --sync` copies the code too. A VM copy you made by hand
+  learns where its source is with one `./labctl sync --from /Users/<you>/path/to/netchaos-lab`.
 - **To get your journals out of the VM:** run `./scripts/mac-vm.sh --pull` on the Mac. It copies
   the VM's `journal/` into your Mac checkout's `journal/`, keeping any file you've edited on the Mac
   since the last pull.
@@ -73,6 +82,11 @@ and mounts can ignore `chmod`. Your journals therefore live in the VM, under
   `--orbstack` or `--lima` if you have both) the first time. The script remembers the VM in
   `.state/mac-vm`, so later `--sync` and `--pull` calls don't need it.
 - **Apple Silicon** works natively: the node image is built locally for arm64.
+- **Starting over with a fresh VM:** `./scripts/mac-vm.sh --rebuild`. It saves the VM's journals
+  first (a `journal-backup-<vm>-<date>.tgz` in your checkout, plus a copy into `./journal`), asks you
+  to type the VM name, deletes the VM, builds a new one and puts the journals back. Everything else
+  in that VM is gone, including the `investigator` user and its token: run
+  `sudo ./ai/setup-ai.sh --token` again afterwards.
 
 ## After a reboot
 
