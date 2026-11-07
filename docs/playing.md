@@ -4,6 +4,8 @@ All commands run on the lab host: your Ubuntu machine, or the lab VM on a Mac.
 
 ```bash
 ./labctl break --level 1          # random fault. Levels 1 (single obvious failure) to 3 (nasty)
+./labctl faults                   # spoiler-free list of faults and which ones you've solved
+./labctl break --level 1 --unsolved   # only faults you haven't solved yet
 ./labctl ticket                   # re-read the ticket
 ./labctl shell web1               # get onto a box (recorded while a fault is active); or: ssh web1
 ./labctl status                   # what a customer sees right now
@@ -16,6 +18,34 @@ All commands run on the lab host: your Ubuntu machine, or the lab VM on a Mac.
 ./labctl up --broken --level 2    # deploy with a fault already in place
 ./labctl reset --ipv6             # clean lab in dual-stack mode (docs/ipv6.md)
 ```
+
+## Working through a level
+
+`./labctl faults` lists every fault without spoilers: a short code per fault (a hash of its name),
+its level, and whether **you** have solved it, gave up on it, or haven't met it yet. It's built from
+the finished incidents in `journal/`.
+
+```
+$ ./labctl faults --level 1
+LEVEL  CODE    YOU                    AI RUNS
+  1    12959e  ✔ solved               0
+  1    66e79d  ~ revealed             0
+  1    a35832  · not yet              2
+  1    b44e82  ✔ solved               0
+
+solved by you: 2 of 4 at level 1
+```
+
+- `./labctl break --level 1 --unsolved` picks only among faults you haven't solved yet. A fault
+  you gave up on (`reveal`) stays in the pool until you solve it.
+- `./labctl break --fault 66e79d` replays one specific fault without telling you which one it is.
+- "You" means human and human+ai runs. AI-only runs are counted separately, so an AI solving a
+  fault doesn't tick it off for you.
+- On a Mac, only the journals in the VM count. Incidents you played from another checkout (e.g.
+  the old Mac folder) count once you copy their files into the VM's `journal/`.
+
+`--seed N` is for reproducing the *same* fault and parameters across runs (e.g. human vs AI). It
+isn't a way to walk through the faults: different seeds can pick the same fault again.
 
 `check` accepts any fix that restores the service and removes the root cause. It doesn't check
 that you typed the reference commands, but it does check that the root cause is gone, so restarting
