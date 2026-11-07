@@ -71,6 +71,7 @@ git clone https://github.com/marion-official/netchaos-lab.git && cd netchaos-lab
 ./scripts/mac-vm.sh           # creates an Ubuntu VM, copies the lab into it, sets it up
 orb -m netchaos               # or: limactl shell netchaos
 cd ~/netchaos-lab && ./labctl up && ./labctl break --level 1
+# edit on the Mac, run in the VM: labctl syncs your Mac edits in by itself (at up/reset/break)
 ```
 
 Full instructions: [docs/getting-started.md](docs/getting-started.md).
